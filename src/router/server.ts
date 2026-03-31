@@ -19,9 +19,10 @@ import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import {
   initUsageTracker,
-  requireUsageHeaders,
   logUsage,
   parseStreamTokens,
+  extractFingerprint,
+  buildFingerprintText,
   shutdownUsageTracker,
 } from './usage-tracker.js';
 
@@ -175,9 +176,6 @@ const ANTHROPIC_BETA =
 // Parse JSON request bodies with increased limit for large payloads
 app.use(express.json({ limit: '50mb' }));
 
-// Enforce X-Agent and X-Automation headers on all proxy endpoints
-app.use(requireUsageHeaders);
-
 // Health check endpoint
 app.get('/health', (_req: Request, res: Response) => {
   res.json({ status: 'ok', service: 'anthropic-max-plan-router' });
@@ -232,13 +230,17 @@ const handleMessagesRequest = async (req: Request, res: Response) => {
   const timestamp = new Date().toISOString();
   const startTime = Date.now();
 
-  // Extract usage tracking headers (already validated by middleware)
-  const agent = req.headers['x-agent'] as string;
-  const automation = req.headers['x-automation'] as string;
+  // Optional usage tracking headers (use if present, null otherwise)
+  const agent = (req.headers['x-agent'] as string) || null;
+  const automation = (req.headers['x-automation'] as string) || null;
 
   try {
     // Get the request body and strip unknown fields (e.g., context_management from Agent SDK)
     const originalRequest = stripUnknownFields(req.body as Record<string, unknown>);
+
+    // Extract fingerprint before modifying the request
+    const fingerprint = extractFingerprint(req, originalRequest, 'anthropic');
+    const fingerprint_text = buildFingerprintText(fingerprint);
 
     const hadSystemPrompt = !!(originalRequest.system && originalRequest.system.length > 0);
 
@@ -312,6 +314,8 @@ const handleMessagesRequest = async (req: Request, res: Response) => {
       logUsage({
         agent,
         automation,
+        fingerprint,
+        fingerprint_text,
         model: originalRequest.model,
         ...tokenAccumulator,
         duration_ms: Date.now() - startTime,
@@ -331,6 +335,8 @@ const handleMessagesRequest = async (req: Request, res: Response) => {
       logUsage({
         agent,
         automation,
+        fingerprint,
+        fingerprint_text,
         model: originalRequest.model,
         input_tokens: responseData.usage?.input_tokens || 0,
         output_tokens: responseData.usage?.output_tokens || 0,
@@ -359,11 +365,15 @@ const handleMessagesRequest = async (req: Request, res: Response) => {
       error instanceof Error ? error : new Error('Unknown error')
     );
 
-    // Log failed request usage
+    // Log failed request usage (build fingerprint from raw body if possible)
+    const errorBody = req.body as AnthropicRequest;
+    const errorFp = extractFingerprint(req, errorBody || { model: 'unknown', max_tokens: 0, messages: [] }, 'anthropic');
     logUsage({
       agent,
       automation,
-      model: (req.body as AnthropicRequest)?.model || 'unknown',
+      fingerprint: errorFp,
+      fingerprint_text: buildFingerprintText(errorFp),
+      model: errorBody?.model || 'unknown',
       input_tokens: 0,
       output_tokens: 0,
       cache_read_tokens: 0,
@@ -407,9 +417,9 @@ const handleChatCompletionsRequest = async (req: Request, res: Response) => {
   const timestamp = new Date().toISOString();
   const startTime = Date.now();
 
-  // Extract usage tracking headers (already validated by middleware)
-  const agent = req.headers['x-agent'] as string;
-  const automation = req.headers['x-automation'] as string;
+  // Optional usage tracking headers
+  const agent = (req.headers['x-agent'] as string) || null;
+  const automation = (req.headers['x-automation'] as string) || null;
 
   try {
     // Get the request body as an OpenAI request
@@ -420,6 +430,10 @@ const handleChatCompletionsRequest = async (req: Request, res: Response) => {
 
     // Translate OpenAI request to Anthropic format
     const anthropicRequest = translateOpenAIToAnthropic(openaiRequest);
+
+    // Extract fingerprint from the translated Anthropic request
+    const fingerprint = extractFingerprint(req, anthropicRequest, 'openai');
+    const fingerprint_text = buildFingerprintText(fingerprint);
 
     const hadSystemPrompt = !!(anthropicRequest.system && anthropicRequest.system.length > 0);
 
@@ -484,6 +498,8 @@ const handleChatCompletionsRequest = async (req: Request, res: Response) => {
       logUsage({
         agent,
         automation,
+        fingerprint,
+        fingerprint_text,
         model: anthropicRequest.model,
         input_tokens: 0,
         output_tokens: 0,
@@ -513,6 +529,8 @@ const handleChatCompletionsRequest = async (req: Request, res: Response) => {
         logUsage({
           agent,
           automation,
+          fingerprint,
+          fingerprint_text,
           model: anthropicRequest.model,
           input_tokens: 0,
           output_tokens: 0,
@@ -543,6 +561,8 @@ const handleChatCompletionsRequest = async (req: Request, res: Response) => {
       logUsage({
         agent,
         automation,
+        fingerprint,
+        fingerprint_text,
         model: anthropicRequest.model,
         input_tokens: anthropicResponse.usage?.input_tokens || 0,
         output_tokens: anthropicResponse.usage?.output_tokens || 0,
@@ -578,10 +598,14 @@ const handleChatCompletionsRequest = async (req: Request, res: Response) => {
       'openai'
     );
 
+    const errorBody = req.body as AnthropicRequest;
+    const errorFp = extractFingerprint(req, errorBody || { model: 'unknown', max_tokens: 0, messages: [] }, 'openai');
     logUsage({
       agent,
       automation,
-      model: (req.body as AnthropicRequest)?.model || 'unknown',
+      fingerprint: errorFp,
+      fingerprint_text: buildFingerprintText(errorFp),
+      model: errorBody?.model || 'unknown',
       input_tokens: 0,
       output_tokens: 0,
       cache_read_tokens: 0,

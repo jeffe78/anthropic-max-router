@@ -1,10 +1,30 @@
 import { Pool } from 'pg';
-import { Request, Response, NextFunction } from 'express';
+import { Request } from 'express';
+import { AnthropicRequest } from '../types.js';
 import { logger } from './logger.js';
 
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+export interface Fingerprint {
+  source_ip: string;
+  endpoint: string; // 'anthropic' | 'openai'
+  model: string;
+  has_images: boolean;
+  system_prefix: string; // first 300 chars of first system message
+  tool_names: string[]; // names of tools in the request
+  message_count: number;
+}
+
 export interface UsageRecord {
-  agent: string;
-  automation: string;
+  // Explicit headers (optional — clients may or may not send these)
+  agent: string | null;
+  automation: string | null;
+  // Request fingerprint
+  fingerprint: Fingerprint;
+  fingerprint_text: string; // human-readable summary for embedding
+  // Usage metrics
   model: string;
   input_tokens: number;
   output_tokens: number;
@@ -16,12 +36,12 @@ export interface UsageRecord {
   request_id: string;
 }
 
+// ---------------------------------------------------------------------------
+// Postgres pool
+// ---------------------------------------------------------------------------
+
 let pool: Pool | null = null;
 
-/**
- * Initialize the Postgres connection pool for usage tracking.
- * Call once at startup. If USAGE_DB_URL is not set, logging is disabled (requests still pass through).
- */
 export function initUsageTracker(): void {
   const connectionString = process.env.USAGE_DB_URL;
   if (!connectionString) {
@@ -35,81 +55,126 @@ export function initUsageTracker(): void {
     logger.error('Usage tracker pool error:', err);
   });
 
-  logger.startup('✅ Usage tracking enabled (Postgres)');
+  logger.startup('✅ Usage tracking enabled (Postgres + embeddings)');
+}
+
+// ---------------------------------------------------------------------------
+// Fingerprint extraction
+// ---------------------------------------------------------------------------
+
+/**
+ * Extract a fingerprint from an incoming request + parsed body.
+ */
+export function extractFingerprint(
+  req: Request,
+  body: AnthropicRequest,
+  endpointType: 'anthropic' | 'openai'
+): Fingerprint {
+  // System prompt prefix
+  let systemPrefix = '';
+  const sys = body.system as unknown;
+  if (sys) {
+    if (typeof sys === 'string') {
+      systemPrefix = sys.slice(0, 300);
+    } else if (Array.isArray(sys) && sys.length > 0) {
+      systemPrefix = ((sys[0] as Record<string, string>).text || '').slice(0, 300);
+    }
+  }
+
+  // Check for images in messages
+  let hasImages = false;
+  for (const msg of body.messages || []) {
+    if (Array.isArray(msg.content)) {
+      for (const block of msg.content) {
+        const blockType = block.type as string;
+        if (blockType === 'image' || blockType === 'image_url') {
+          hasImages = true;
+          break;
+        }
+      }
+    }
+    if (hasImages) break;
+  }
+
+  // Tool names
+  const toolNames = (body.tools || []).map((t) => t.name).sort();
+
+  return {
+    source_ip: req.ip || req.socket.remoteAddress || 'unknown',
+    endpoint: endpointType,
+    model: body.model || 'unknown',
+    has_images: hasImages,
+    system_prefix: systemPrefix,
+    tool_names: toolNames,
+    message_count: (body.messages || []).length,
+  };
 }
 
 /**
- * Express middleware that enforces X-Agent and X-Automation headers.
- * Returns 400 if either is missing. Skips /health and /v1/models.
+ * Build a human-readable text summary of the fingerprint for embedding.
+ * Designed to produce semantically meaningful text that clusters well.
  */
-export function requireUsageHeaders(req: Request, res: Response, next: NextFunction): void {
-  // Skip non-proxied endpoints
-  if (req.path === '/health' || req.path === '/v1/models') {
-    next();
-    return;
+export function buildFingerprintText(fp: Fingerprint): string {
+  const parts: string[] = [];
+
+  parts.push(`endpoint:${fp.endpoint}`);
+  parts.push(`model:${fp.model}`);
+  parts.push(`source:${fp.source_ip === '127.0.0.1' || fp.source_ip === '::1' ? 'local' : 'remote'}`);
+
+  if (fp.has_images) parts.push('has_images:true');
+  if (fp.tool_names.length > 0) parts.push(`tools:${fp.tool_names.join(',')}`);
+
+  parts.push(`messages:${fp.message_count}`);
+
+  if (fp.system_prefix) {
+    parts.push(`system:${fp.system_prefix}`);
   }
 
-  const agent = req.headers['x-agent'] as string | undefined;
-  const automation = req.headers['x-automation'] as string | undefined;
-
-  if (!agent || !automation) {
-    const missing: string[] = [];
-    if (!agent) missing.push('X-Agent');
-    if (!automation) missing.push('X-Automation');
-
-    res.status(400).json({
-      type: 'error',
-      error: {
-        type: 'invalid_request_error',
-        message: `Missing required header(s): ${missing.join(', ')}. All requests must include X-Agent and X-Automation headers.`,
-      },
-    });
-    return;
-  }
-
-  next();
+  return parts.join(' | ');
 }
 
-/**
- * Write a usage record to Postgres. Fire-and-forget — errors are logged but never block the response.
- */
-export async function logUsage(record: UsageRecord): Promise<void> {
-  if (!pool) return;
+// ---------------------------------------------------------------------------
+// Embedding via Ollama
+// ---------------------------------------------------------------------------
 
+const OLLAMA_URL = process.env.OLLAMA_URL || 'http://worldslab.tailb1596.ts.net:11434';
+
+async function embed(text: string): Promise<number[] | null> {
   try {
-    await pool.query(
-      `INSERT INTO max_proxy_usage
-        (agent, automation, model, input_tokens, output_tokens, cache_read_tokens, cache_create_tokens, duration_ms, status, stream, request_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
-      [
-        record.agent,
-        record.automation,
-        record.model,
-        record.input_tokens,
-        record.output_tokens,
-        record.cache_read_tokens,
-        record.cache_create_tokens,
-        record.duration_ms,
-        record.status,
-        record.stream,
-        record.request_id,
-      ]
-    );
+    const resp = await fetch(`${OLLAMA_URL}/api/embeddings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'nomic-embed-text', prompt: text }),
+    });
+    if (!resp.ok) {
+      logger.error(`Embedding request failed: ${resp.status}`);
+      return null;
+    }
+    const data = (await resp.json()) as { embedding: number[] };
+    return data.embedding;
   } catch (err) {
-    logger.error('Failed to log usage:', err);
+    logger.error('Embedding error:', err);
+    return null;
   }
 }
 
-/**
- * Parse token usage from Anthropic SSE stream events.
- * Call with each parsed SSE data object during streaming.
- */
+// ---------------------------------------------------------------------------
+// Streaming token parser
+// ---------------------------------------------------------------------------
+
 export function parseStreamTokens(
   event: Record<string, unknown>,
-  accumulator: { input_tokens: number; output_tokens: number; cache_read_tokens: number; cache_create_tokens: number }
+  accumulator: {
+    input_tokens: number;
+    output_tokens: number;
+    cache_read_tokens: number;
+    cache_create_tokens: number;
+  }
 ): void {
   if (event.type === 'message_start') {
-    const usage = (event.message as Record<string, unknown>)?.usage as Record<string, number> | undefined;
+    const usage = (event.message as Record<string, unknown>)?.usage as
+      | Record<string, number>
+      | undefined;
     if (usage) {
       accumulator.input_tokens = usage.input_tokens || 0;
       accumulator.cache_read_tokens = usage.cache_read_input_tokens || 0;
@@ -123,9 +188,55 @@ export function parseStreamTokens(
   }
 }
 
-/**
- * Graceful shutdown — drain the pool.
- */
+// ---------------------------------------------------------------------------
+// Log to Postgres (fire-and-forget)
+// ---------------------------------------------------------------------------
+
+export async function logUsage(record: UsageRecord): Promise<void> {
+  if (!pool) return;
+
+  try {
+    // Embed the fingerprint text (async, but we await to get the vector before INSERT)
+    const embedding = await embed(record.fingerprint_text);
+
+    await pool.query(
+      `INSERT INTO max_proxy_usage
+        (agent, automation, model, input_tokens, output_tokens,
+         cache_read_tokens, cache_create_tokens, duration_ms, status, stream,
+         request_id, source_ip, endpoint, has_images, system_prefix,
+         tool_names, message_count, fingerprint_text, embedding)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`,
+      [
+        record.agent,
+        record.automation,
+        record.model,
+        record.input_tokens,
+        record.output_tokens,
+        record.cache_read_tokens,
+        record.cache_create_tokens,
+        record.duration_ms,
+        record.status,
+        record.stream,
+        record.request_id,
+        record.fingerprint.source_ip,
+        record.fingerprint.endpoint,
+        record.fingerprint.has_images,
+        record.fingerprint.system_prefix,
+        record.fingerprint.tool_names,
+        record.fingerprint.message_count,
+        record.fingerprint_text,
+        embedding ? `[${embedding.join(',')}]` : null,
+      ]
+    );
+  } catch (err) {
+    logger.error('Failed to log usage:', err);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Shutdown
+// ---------------------------------------------------------------------------
+
 export async function shutdownUsageTracker(): Promise<void> {
   if (pool) {
     await pool.end();
