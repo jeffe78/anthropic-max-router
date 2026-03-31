@@ -17,6 +17,13 @@ import {
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
+import {
+  initUsageTracker,
+  requireUsageHeaders,
+  logUsage,
+  parseStreamTokens,
+  shutdownUsageTracker,
+} from './usage-tracker.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -168,6 +175,9 @@ const ANTHROPIC_BETA =
 // Parse JSON request bodies with increased limit for large payloads
 app.use(express.json({ limit: '50mb' }));
 
+// Enforce X-Agent and X-Automation headers on all proxy endpoints
+app.use(requireUsageHeaders);
+
 // Health check endpoint
 app.get('/health', (_req: Request, res: Response) => {
   res.json({ status: 'ok', service: 'anthropic-max-plan-router' });
@@ -220,6 +230,11 @@ app.get('/v1/models', async (req: Request, res: Response) => {
 const handleMessagesRequest = async (req: Request, res: Response) => {
   const requestId = Math.random().toString(36).substring(7);
   const timestamp = new Date().toISOString();
+  const startTime = Date.now();
+
+  // Extract usage tracking headers (already validated by middleware)
+  const agent = req.headers['x-agent'] as string;
+  const automation = req.headers['x-automation'] as string;
 
   try {
     // Get the request body and strip unknown fields (e.g., context_management from Agent SDK)
@@ -266,18 +281,67 @@ const handleMessagesRequest = async (req: Request, res: Response) => {
       res.setHeader('Cache-Control', 'no-cache');
       res.setHeader('Connection', 'keep-alive');
       res.status(response.status);
-      // Pipe the Anthropic response stream directly to the client
+
+      // Parse streaming events to extract token counts
+      const tokenAccumulator = { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_create_tokens: 0 };
+      const decoder = new TextDecoder();
+      let sseBuffer = '';
+
       for await (const chunk of response.body as AsyncIterable<Uint8Array>) {
         res.write(chunk);
+
+        // Parse SSE events from chunk to extract usage
+        sseBuffer += decoder.decode(chunk, { stream: true });
+        const lines = sseBuffer.split('\n');
+        sseBuffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (line.startsWith('data: ') && line !== 'data: [DONE]') {
+            try {
+              const event = JSON.parse(line.slice(6));
+              parseStreamTokens(event, tokenAccumulator);
+            } catch {
+              // Ignore parse errors
+            }
+          }
+        }
       }
       res.end();
-      // Logging for streaming responses
+
+      // Log usage for streaming response
+      logUsage({
+        agent,
+        automation,
+        model: originalRequest.model,
+        ...tokenAccumulator,
+        duration_ms: Date.now() - startTime,
+        status: response.status,
+        stream: true,
+        request_id: requestId,
+      });
+
       logger.logRequest(requestId, timestamp, originalRequest, hadSystemPrompt, {
         status: response.status,
         data: undefined,
       });
     } else {
       const responseData = (await response.json()) as AnthropicResponse;
+
+      // Log usage for non-streaming response
+      logUsage({
+        agent,
+        automation,
+        model: originalRequest.model,
+        input_tokens: responseData.usage?.input_tokens || 0,
+        output_tokens: responseData.usage?.output_tokens || 0,
+        cache_read_tokens: responseData.usage?.cache_read_input_tokens || 0,
+        cache_create_tokens: responseData.usage?.cache_creation_input_tokens || 0,
+        duration_ms: Date.now() - startTime,
+        status: response.status,
+        stream: false,
+        request_id: requestId,
+      });
+
       logger.logRequest(requestId, timestamp, originalRequest, hadSystemPrompt, {
         status: response.status,
         data: responseData,
@@ -294,6 +358,21 @@ const handleMessagesRequest = async (req: Request, res: Response) => {
       undefined,
       error instanceof Error ? error : new Error('Unknown error')
     );
+
+    // Log failed request usage
+    logUsage({
+      agent,
+      automation,
+      model: (req.body as AnthropicRequest)?.model || 'unknown',
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_create_tokens: 0,
+      duration_ms: Date.now() - startTime,
+      status: 500,
+      stream: false,
+      request_id: requestId,
+    });
 
     // If headers were already sent (e.g., streaming response in progress),
     // we cannot send an error response - just log and return
@@ -326,6 +405,11 @@ const handleMessagesRequest = async (req: Request, res: Response) => {
 const handleChatCompletionsRequest = async (req: Request, res: Response) => {
   const requestId = Math.random().toString(36).substring(7);
   const timestamp = new Date().toISOString();
+  const startTime = Date.now();
+
+  // Extract usage tracking headers (already validated by middleware)
+  const agent = req.headers['x-agent'] as string;
+  const automation = req.headers['x-automation'] as string;
 
   try {
     // Get the request body as an OpenAI request
@@ -396,7 +480,21 @@ const handleChatCompletionsRequest = async (req: Request, res: Response) => {
 
       res.end();
 
-      // Log streaming response
+      // Log streaming response usage (token counts not available in OpenAI stream translation)
+      logUsage({
+        agent,
+        automation,
+        model: anthropicRequest.model,
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_tokens: 0,
+        cache_create_tokens: 0,
+        duration_ms: Date.now() - startTime,
+        status: response.status,
+        stream: true,
+        request_id: requestId,
+      });
+
       logger.logRequest(
         requestId,
         timestamp,
@@ -411,6 +509,21 @@ const handleChatCompletionsRequest = async (req: Request, res: Response) => {
       if (!response.ok) {
         const errorData = await response.json();
         const openaiError = translateAnthropicErrorToOpenAI(errorData);
+
+        logUsage({
+          agent,
+          automation,
+          model: anthropicRequest.model,
+          input_tokens: 0,
+          output_tokens: 0,
+          cache_read_tokens: 0,
+          cache_create_tokens: 0,
+          duration_ms: Date.now() - startTime,
+          status: response.status,
+          stream: false,
+          request_id: requestId,
+        });
+
         logger.logRequest(
           requestId,
           timestamp,
@@ -426,6 +539,20 @@ const handleChatCompletionsRequest = async (req: Request, res: Response) => {
 
       const anthropicResponse = (await response.json()) as AnthropicResponse;
       const openaiResponse = translateAnthropicToOpenAI(anthropicResponse, openaiRequest.model);
+
+      logUsage({
+        agent,
+        automation,
+        model: anthropicRequest.model,
+        input_tokens: anthropicResponse.usage?.input_tokens || 0,
+        output_tokens: anthropicResponse.usage?.output_tokens || 0,
+        cache_read_tokens: anthropicResponse.usage?.cache_read_input_tokens || 0,
+        cache_create_tokens: anthropicResponse.usage?.cache_creation_input_tokens || 0,
+        duration_ms: Date.now() - startTime,
+        status: response.status,
+        stream: false,
+        request_id: requestId,
+      });
 
       logger.logRequest(
         requestId,
@@ -450,6 +577,20 @@ const handleChatCompletionsRequest = async (req: Request, res: Response) => {
       error instanceof Error ? error : new Error('Unknown error'),
       'openai'
     );
+
+    logUsage({
+      agent,
+      automation,
+      model: (req.body as AnthropicRequest)?.model || 'unknown',
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_create_tokens: 0,
+      duration_ms: Date.now() - startTime,
+      status: 500,
+      stream: false,
+      request_id: requestId,
+    });
 
     // If headers were already sent (e.g., streaming response in progress),
     // we cannot send an error response - just log and return
@@ -492,6 +633,9 @@ async function startRouter() {
   logger.startup('╚═╝     ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝    ╚═╝     ╚══════╝╚═╝  ╚═╝╚═╝  ╚═══╝');
   logger.startup('                         ═══════ Router ═══════                     ');
   logger.startup('');
+
+  // Initialize usage tracking (requires USAGE_DB_URL env var)
+  initUsageTracker();
 
   // Check if we have tokens
   let tokens = await loadTokens();
@@ -579,6 +723,18 @@ async function startRouter() {
     logger.startup('');
   });
 }
+
+// Graceful shutdown — drain usage tracker pool
+process.on('SIGTERM', async () => {
+  logger.info('SIGTERM received, shutting down...');
+  await shutdownUsageTracker();
+  process.exit(0);
+});
+process.on('SIGINT', async () => {
+  logger.info('SIGINT received, shutting down...');
+  await shutdownUsageTracker();
+  process.exit(0);
+});
 
 // Start the router
 startRouter().catch((error) => {
