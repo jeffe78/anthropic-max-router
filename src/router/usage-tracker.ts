@@ -203,7 +203,7 @@ export async function logUsage(record: UsageRecord): Promise<void> {
       `INSERT INTO max_proxy_usage
         (agent, automation, model, input_tokens, output_tokens,
          cache_read_tokens, cache_create_tokens, duration_ms, status, stream,
-         request_id, source_ip, endpoint, has_images, system_prefix,
+         request_id, source_ip, endpoint, has_images, system_prompt,
          tool_names, message_count, fingerprint_text, embedding, account)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
       [
