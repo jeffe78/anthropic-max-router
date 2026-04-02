@@ -178,7 +178,7 @@ app.use(express.json({ limit: '50mb' }));
 
 // Health check endpoint
 app.get('/health', (_req: Request, res: Response) => {
-  res.json({ status: 'ok', service: 'anthropic-max-plan-router' });
+  res.json({ status: 'ok', service: 'anthropic-max-plan-router', account: process.env.ACCOUNT_LABEL || 'default' });
 });
 
 // OpenAI Models endpoint - proxy to Anthropic API with API key

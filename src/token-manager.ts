@@ -17,7 +17,7 @@ import fs from 'fs/promises';
 import type { OAuthTokens } from './types.js';
 import { refreshAccessToken } from './oauth.js';
 
-const TOKEN_FILE = '.oauth-tokens.json';
+const TOKEN_FILE = process.env.TOKEN_FILE_PATH || '.oauth-tokens.json';
 
 /**
  * Save tokens to file
