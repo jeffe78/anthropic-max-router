@@ -196,7 +196,8 @@ export function translateAnthropicToOpenAI(
 export async function* translateAnthropicStreamToOpenAI(
   anthropicStream: AsyncIterable<Uint8Array>,
   originalModel: string,
-  messageId: string
+  messageId: string,
+  tokenAccumulator?: { input_tokens: number; output_tokens: number; cache_read_tokens: number; cache_create_tokens: number }
 ): AsyncGenerator<string, void, unknown> {
   const decoder = new TextDecoder();
   let buffer = '';
@@ -250,9 +251,17 @@ export async function* translateAnthropicStreamToOpenAI(
           } else if (event.type === 'message_delta' && event.usage) {
             // Update token counts
             totalOutputTokens = event.usage.output_tokens || totalOutputTokens;
+            if (tokenAccumulator) {
+              tokenAccumulator.output_tokens = totalOutputTokens;
+            }
           } else if (event.type === 'message_start' && event.message?.usage) {
             // Initial token count
             totalInputTokens = event.message.usage.input_tokens || 0;
+            if (tokenAccumulator) {
+              tokenAccumulator.input_tokens = totalInputTokens;
+              tokenAccumulator.cache_read_tokens = event.message.usage.cache_read_input_tokens || 0;
+              tokenAccumulator.cache_create_tokens = event.message.usage.cache_creation_input_tokens || 0;
+            }
           }
         } catch {
           // Ignore parse errors for streaming events

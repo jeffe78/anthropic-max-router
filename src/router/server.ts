@@ -483,28 +483,29 @@ const handleChatCompletionsRequest = async (req: Request, res: Response) => {
       // Generate a message ID for the stream
       const messageId = `chatcmpl-${requestId}`;
 
+      // Parse streaming events to extract token counts
+      const tokenAccumulator = { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_create_tokens: 0 };
+
       // Translate Anthropic stream to OpenAI format
       for await (const chunk of translateAnthropicStreamToOpenAI(
         response.body as AsyncIterable<Uint8Array>,
         openaiRequest.model,
-        messageId
+        messageId,
+        tokenAccumulator
       )) {
         res.write(chunk);
       }
 
       res.end();
 
-      // Log streaming response usage (token counts not available in OpenAI stream translation)
+      // Log streaming response usage
       logUsage({
         agent,
         automation,
         fingerprint,
         fingerprint_text,
         model: anthropicRequest.model,
-        input_tokens: 0,
-        output_tokens: 0,
-        cache_read_tokens: 0,
-        cache_create_tokens: 0,
+        ...tokenAccumulator,
         duration_ms: Date.now() - startTime,
         status: response.status,
         stream: true,
