@@ -100,7 +100,7 @@ export function translateAnthropicToCodex(request: AnthropicRequest): CodexRespo
   const codexRequest: CodexResponsesRequest = {
     model: DEFAULT_CODEX_MODEL,
     input,
-    stream: request.stream ?? false,
+    stream: true, // Codex Responses API requires streaming
     store: false,
   };
 
