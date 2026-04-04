@@ -50,7 +50,7 @@ function translateToOllamaRequest(request: AnthropicRequest) {
  */
 function translateFromOllamaResponse(ollamaResp: Record<string, unknown>): AnthropicResponse {
   const choices = ollamaResp.choices as Array<{
-    message?: { content?: string };
+    message?: { content?: string; reasoning?: string };
     finish_reason?: string;
   }>;
   const usage = ollamaResp.usage as {
@@ -58,7 +58,10 @@ function translateFromOllamaResponse(ollamaResp: Record<string, unknown>): Anthr
     completion_tokens?: number;
   } | undefined;
 
-  const text = choices?.[0]?.message?.content || '';
+  const content = choices?.[0]?.message?.content || '';
+  const reasoning = choices?.[0]?.message?.reasoning || '';
+  // Use content if available; fall back to reasoning for thinking models like Gemma 4
+  const text = content || reasoning;
   const finishReason = choices?.[0]?.finish_reason;
 
   let stopReason: string | null = 'end_turn';
@@ -139,12 +142,14 @@ async function* translateOllamaStreamToAnthropic(
         }
 
         const delta = event.choices?.[0]?.delta;
-        if (delta?.content) {
+        // Emit content deltas; for thinking models, reasoning arrives before content
+        const textDelta = delta?.content || delta?.reasoning;
+        if (textDelta) {
           yield encoder.encode(
             `event: content_block_delta\ndata: ${JSON.stringify({
               type: 'content_block_delta',
               index: 0,
-              delta: { type: 'text_delta', text: delta.content },
+              delta: { type: 'text_delta', text: textDelta },
             })}\n\n`,
           );
         }
