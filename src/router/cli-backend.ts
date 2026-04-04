@@ -271,7 +271,7 @@ export async function cliBackend(
     '--output-format', 'stream-json',
     '--verbose',
     '--model', request.model,
-    '--permission-mode', 'bypassPermissions',
+    '--allowedTools', 'Read,Edit,Write,Bash,Glob,Grep,WebFetch,WebSearch',
   ];
 
   // System prompt (skip the "You are Claude Code" part — CLI already has it)
