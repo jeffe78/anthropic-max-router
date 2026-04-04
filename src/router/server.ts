@@ -198,7 +198,7 @@ const isOpenAI = backendType === 'openai';
 app.use(express.json({ limit: '50mb' }));
 
 // Health check endpoint
-const backendDisplayName = backendType === 'openai' ? 'OpenAI Sub' : backendType === 'cli' ? 'Anthropic CLI' : 'Anthropic Max Pro';
+const backendDisplayName = backendType === 'ollama' ? (process.env.OLLAMA_ACCOUNT_LABEL || 'Ollama') : backendType === 'openai' ? 'OpenAI Sub' : backendType === 'cli' ? 'Anthropic CLI' : 'Anthropic Max Pro';
 app.get('/health', (_req: Request, res: Response) => {
   res.json({ status: 'ok', service: 'anthropic-max-plan-router', account: process.env.ACCOUNT_LABEL || 'default', backend: backendDisplayName });
 });
@@ -673,7 +673,14 @@ async function startRouter() {
   // Initialize usage tracking (requires USAGE_DB_URL env var)
   initUsageTracker();
 
-  if (isCli) {
+  const isOllama = backendType === 'ollama';
+
+  if (isOllama) {
+    // Ollama backend — no OAuth needed, local model
+    logger.startup(`🔧 Backend: Ollama (${process.env.OLLAMA_MODEL || 'default'})`);
+    logger.startup(`📡 Ollama URL: ${process.env.OLLAMA_URL || 'http://localhost:11434'}`);
+    logger.startup('✅ No authentication required for local model.');
+  } else if (isCli) {
     // CLI backend — no OAuth needed, claude CLI handles its own auth
     logger.startup(`🔧 Backend: CLI (claude -p)`);
     logger.startup('✅ Using Claude Code CLI subscription auth.');

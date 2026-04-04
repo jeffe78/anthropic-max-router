@@ -79,6 +79,17 @@ export function getBackend(): BackendExecutor {
     };
   }
 
+  if (backendType === 'ollama') {
+    let ollamaBackendFn: BackendExecutor | null = null;
+    return async (request, options) => {
+      if (!ollamaBackendFn) {
+        const mod = await import('./ollama-backend.js');
+        ollamaBackendFn = mod.ollamaBackend;
+      }
+      return ollamaBackendFn(request, options);
+    };
+  }
+
   if (backendType !== 'api') {
     logger.info(`Unknown BACKEND="${backendType}", falling back to "api"`);
   }
