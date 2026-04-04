@@ -112,9 +112,7 @@ export function translateAnthropicToCodex(request: AnthropicRequest): CodexRespo
     codexRequest.tool_choice = 'auto';
   }
 
-  if (request.max_tokens) {
-    codexRequest.max_output_tokens = request.max_tokens;
-  }
+  // Note: max_output_tokens is not supported by the Codex Responses API
 
   return codexRequest;
 }
