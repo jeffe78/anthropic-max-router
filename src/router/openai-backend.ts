@@ -11,7 +11,10 @@ import { AnthropicRequest, BackendResult, BackendOptions, CodexResponsesResponse
 import { translateAnthropicToCodex, translateCodexToAnthropic, translateCodexStreamToAnthropic } from './codex-translator.js';
 import { logger } from './logger.js';
 
-const CODEX_API_URL = process.env.OPENAI_API_URL || 'https://api.openai.com/v1/responses';
+// ChatGPT Plus/Pro OAuth tokens must use the ChatGPT backend endpoint
+// (api.openai.com/v1/responses requires the api.responses.write scope
+// which the Codex OAuth client doesn't grant)
+const CODEX_API_URL = process.env.OPENAI_API_URL || 'https://chatgpt.com/backend-api/codex/responses';
 
 /**
  * OpenAI backend — translates to Codex Responses API and proxies upstream.
