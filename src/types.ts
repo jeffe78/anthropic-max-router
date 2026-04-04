@@ -258,3 +258,76 @@ export interface OpenAIErrorResponse {
     code?: string | null;
   };
 }
+
+/**
+ * CLI Backend Types — for parsing `claude -p --output-format stream-json` output
+ */
+
+/** Wraps a standard Anthropic SSE event — the .event field is identical to API SSE payloads */
+export interface CliStreamEvent {
+  type: 'stream_event';
+  event: Record<string, unknown>;
+  session_id: string;
+  parent_tool_use_id: string | null;
+}
+
+/** Emitted at process start with session info */
+export interface CliSystemEvent {
+  type: 'system';
+  subtype: 'init';
+  session_id: string;
+  model: string;
+  tools: string[];
+}
+
+/** Emitted at process end with usage summary */
+export interface CliResultEvent {
+  type: 'result';
+  subtype: 'success' | 'error';
+  is_error: boolean;
+  duration_ms: number;
+  duration_api_ms: number;
+  result: string;
+  stop_reason: string;
+  session_id: string;
+  total_cost_usd: number;
+  usage: {
+    input_tokens: number;
+    output_tokens: number;
+    cache_read_input_tokens: number;
+    cache_creation_input_tokens: number;
+  };
+}
+
+/** Contains a complete Anthropic-format message object */
+export interface CliAssistantEvent {
+  type: 'assistant';
+  message: AnthropicResponse;
+  session_id: string;
+}
+
+/** Union of all CLI stream-json event types */
+export type CliEvent = CliStreamEvent | CliSystemEvent | CliResultEvent | CliAssistantEvent;
+
+/**
+ * Backend abstraction types
+ */
+
+export interface BackendResult {
+  status: number;
+  isStream: boolean;
+  /** SSE-formatted chunks for streaming responses */
+  stream?: AsyncIterable<Uint8Array>;
+  /** Parsed response for non-streaming responses */
+  json?: AnthropicResponse;
+}
+
+export type BackendExecutor = (
+  request: AnthropicRequest,
+  options: BackendOptions,
+) => Promise<BackendResult>;
+
+export interface BackendOptions {
+  requestId: string;
+  accessToken?: string;
+}

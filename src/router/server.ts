@@ -5,7 +5,7 @@ import readline from 'readline';
 import { getValidAccessToken, loadTokens, saveTokens } from '../token-manager.js';
 import { startOAuthFlow, exchangeCodeForTokens } from '../oauth.js';
 import { ensureRequiredSystemPrompt, stripUnknownFields } from './middleware.js';
-import { AnthropicRequest, AnthropicResponse, OpenAIChatCompletionRequest } from '../types.js';
+import { AnthropicRequest, AnthropicResponse, OpenAIChatCompletionRequest, BackendExecutor } from '../types.js';
 import { logger } from './logger.js';
 import {
   translateOpenAIToAnthropic,
@@ -25,6 +25,7 @@ import {
   buildFingerprintText,
   shutdownUsageTracker,
 } from './usage-tracker.js';
+import { getBackend, getBackendType, ANTHROPIC_VERSION } from './backend.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -105,6 +106,12 @@ function parseArgs() {
       endpointConfig.anthropicEnabled = false;
     } else if (arg === '--disable-bearer-passthrough') {
       endpointConfig.allowBearerPassthrough = false;
+    } else if (arg === '--backend') {
+      const backendValue = args[i + 1];
+      if (backendValue && !backendValue.startsWith('-')) {
+        process.env.BACKEND = backendValue;
+        i++; // Skip next arg since we consumed it
+      }
     }
     // medium is default, no flag needed
   }
@@ -138,6 +145,10 @@ Options:
   Authentication control (default: passthrough enabled):
   --disable-bearer-passthrough  Force all requests to use router's OAuth tokens
 
+  Backend selection (default: api):
+  --backend api                 Use Anthropic API backend (default)
+  --backend cli                 Use Claude Code CLI backend (claude -p)
+
   Verbosity levels (default: medium):
   -q, --quiet               Quiet mode - no request logging
   -m, --minimal             Minimal logging - one line per request
@@ -147,6 +158,10 @@ Options:
 Environment variables:
   ROUTER_PORT               Port to listen on (default: 3000)
   ANTHROPIC_DEFAULT_MODEL   Override model mapping (e.g., claude-haiku-4-5)
+  BACKEND                   Backend type: "api" (default) or "cli"
+  CLI_BARE_MODE             Set to "true" to skip hooks/CLAUDE.md in CLI backend
+  CLI_TIMEOUT               CLI process timeout in ms (default: 300000)
+  CLI_SESSION_TTL           CLI session TTL in ms (default: 3600000)
 
 Examples:
   npm run router                          # Start Anthropic endpoint only
@@ -167,18 +182,17 @@ parseArgs();
 
 const app = express();
 
-// Anthropic API configuration
-const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
-const ANTHROPIC_VERSION = '2023-06-01';
-const ANTHROPIC_BETA =
-  'oauth-2025-04-20,claude-code-20250219,interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14';
+// Backend executor — selected by BACKEND env var or --backend flag
+const backend: BackendExecutor = getBackend();
+const backendType = getBackendType();
+const isCli = backendType === 'cli';
 
 // Parse JSON request bodies with increased limit for large payloads
 app.use(express.json({ limit: '50mb' }));
 
 // Health check endpoint
 app.get('/health', (_req: Request, res: Response) => {
-  res.json({ status: 'ok', service: 'anthropic-max-plan-router', account: process.env.ACCOUNT_LABEL || 'default' });
+  res.json({ status: 'ok', service: 'anthropic-max-plan-router', account: process.env.ACCOUNT_LABEL || 'default', backend: backendType });
 });
 
 // OpenAI Models endpoint - proxy to Anthropic API with API key
@@ -247,49 +261,42 @@ const handleMessagesRequest = async (req: Request, res: Response) => {
     // Ensure the required system prompt is present
     const modifiedRequest = ensureRequiredSystemPrompt(originalRequest);
 
-    // Determine which authentication method to use
-    const clientBearerToken = extractBearerToken(req);
-    const usePassthrough = endpointConfig.allowBearerPassthrough && clientBearerToken !== null;
+    // Determine which authentication method to use (skip for CLI backend)
+    let accessToken: string | undefined;
+    if (!isCli) {
+      const clientBearerToken = extractBearerToken(req);
+      const usePassthrough = endpointConfig.allowBearerPassthrough && clientBearerToken !== null;
 
-    let accessToken: string;
-    if (usePassthrough) {
-      accessToken = clientBearerToken!;
-      if (logger['level'] === 'maximum') {
-        logger.info(`[Passthrough] Using client bearer token for request ${requestId}`);
-      }
-    } else {
-      // Get a valid OAuth access token (auto-refreshes if needed)
-      accessToken = await getValidAccessToken();
-      if (logger['level'] === 'maximum') {
-        logger.info(`[OAuth] Using router OAuth token for request ${requestId}`);
+      if (usePassthrough) {
+        accessToken = clientBearerToken!;
+        if (logger['level'] === 'maximum') {
+          logger.info(`[Passthrough] Using client bearer token for request ${requestId}`);
+        }
+      } else {
+        // Get a valid OAuth access token (auto-refreshes if needed)
+        accessToken = await getValidAccessToken();
+        if (logger['level'] === 'maximum') {
+          logger.info(`[OAuth] Using router OAuth token for request ${requestId}`);
+        }
       }
     }
 
-    // Forward the request to Anthropic API
-    const response = await fetch(ANTHROPIC_API_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${accessToken}`,
-        'anthropic-version': ANTHROPIC_VERSION,
-        'anthropic-beta': ANTHROPIC_BETA,
-      },
-      body: JSON.stringify(modifiedRequest),
-    });
+    // Execute via the configured backend (API fetch or CLI spawn)
+    const result = await backend(modifiedRequest, { requestId, accessToken });
 
     // Forward the status code and response
-    if (response.headers.get('content-type')?.includes('text/event-stream')) {
+    if (result.isStream && result.stream) {
       res.setHeader('Content-Type', 'text/event-stream');
       res.setHeader('Cache-Control', 'no-cache');
       res.setHeader('Connection', 'keep-alive');
-      res.status(response.status);
+      res.status(result.status);
 
       // Parse streaming events to extract token counts
       const tokenAccumulator = { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_create_tokens: 0 };
       const decoder = new TextDecoder();
       let sseBuffer = '';
 
-      for await (const chunk of response.body as AsyncIterable<Uint8Array>) {
+      for await (const chunk of result.stream) {
         res.write(chunk);
 
         // Parse SSE events from chunk to extract usage
@@ -319,17 +326,17 @@ const handleMessagesRequest = async (req: Request, res: Response) => {
         model: originalRequest.model,
         ...tokenAccumulator,
         duration_ms: Date.now() - startTime,
-        status: response.status,
+        status: result.status,
         stream: true,
         request_id: requestId,
       });
 
       logger.logRequest(requestId, timestamp, originalRequest, hadSystemPrompt, {
-        status: response.status,
+        status: result.status,
         data: undefined,
       });
     } else {
-      const responseData = (await response.json()) as AnthropicResponse;
+      const responseData = result.json as AnthropicResponse;
 
       // Log usage for non-streaming response
       logUsage({
@@ -343,16 +350,16 @@ const handleMessagesRequest = async (req: Request, res: Response) => {
         cache_read_tokens: responseData.usage?.cache_read_input_tokens || 0,
         cache_create_tokens: responseData.usage?.cache_creation_input_tokens || 0,
         duration_ms: Date.now() - startTime,
-        status: response.status,
+        status: result.status,
         stream: false,
         request_id: requestId,
       });
 
       logger.logRequest(requestId, timestamp, originalRequest, hadSystemPrompt, {
-        status: response.status,
+        status: result.status,
         data: responseData,
       });
-      res.status(response.status).json(responseData);
+      res.status(result.status).json(responseData);
     }
   } catch (error) {
     // Log the error
@@ -440,45 +447,35 @@ const handleChatCompletionsRequest = async (req: Request, res: Response) => {
     // Ensure the required system prompt is present
     const modifiedRequest = ensureRequiredSystemPrompt(anthropicRequest);
 
-    // Determine which authentication method to use
-    const clientBearerToken = extractBearerToken(req);
-    const usePassthrough = endpointConfig.allowBearerPassthrough && clientBearerToken !== null;
+    // Determine which authentication method to use (skip for CLI backend)
+    let accessToken: string | undefined;
+    if (!isCli) {
+      const clientBearerToken = extractBearerToken(req);
+      const usePassthrough = endpointConfig.allowBearerPassthrough && clientBearerToken !== null;
 
-    let accessToken: string;
-    if (usePassthrough) {
-      accessToken = clientBearerToken!;
-      if (logger['level'] === 'maximum') {
-        logger.info(`[Passthrough] Using client bearer token for request ${requestId}`);
-      }
-    } else {
-      // Get a valid OAuth access token (auto-refreshes if needed)
-      accessToken = await getValidAccessToken();
-      if (logger['level'] === 'maximum') {
-        logger.info(`[OAuth] Using router OAuth token for request ${requestId}`);
+      if (usePassthrough) {
+        accessToken = clientBearerToken!;
+        if (logger['level'] === 'maximum') {
+          logger.info(`[Passthrough] Using client bearer token for request ${requestId}`);
+        }
+      } else {
+        // Get a valid OAuth access token (auto-refreshes if needed)
+        accessToken = await getValidAccessToken();
+        if (logger['level'] === 'maximum') {
+          logger.info(`[OAuth] Using router OAuth token for request ${requestId}`);
+        }
       }
     }
 
-    // Forward the request to Anthropic API
-    const response = await fetch(ANTHROPIC_API_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${accessToken}`,
-        'anthropic-version': ANTHROPIC_VERSION,
-        'anthropic-beta': ANTHROPIC_BETA,
-      },
-      body: JSON.stringify(modifiedRequest),
-    });
+    // Execute via the configured backend (API fetch or CLI spawn)
+    const result = await backend(modifiedRequest, { requestId, accessToken });
 
     // Handle streaming responses
-    if (
-      openaiRequest.stream &&
-      response.headers.get('content-type')?.includes('text/event-stream')
-    ) {
+    if (openaiRequest.stream && result.isStream && result.stream) {
       res.setHeader('Content-Type', 'text/event-stream');
       res.setHeader('Cache-Control', 'no-cache');
       res.setHeader('Connection', 'keep-alive');
-      res.status(response.status);
+      res.status(result.status);
 
       // Generate a message ID for the stream
       const messageId = `chatcmpl-${requestId}`;
@@ -488,7 +485,7 @@ const handleChatCompletionsRequest = async (req: Request, res: Response) => {
 
       // Translate Anthropic stream to OpenAI format
       for await (const chunk of translateAnthropicStreamToOpenAI(
-        response.body as AsyncIterable<Uint8Array>,
+        result.stream,
         openaiRequest.model,
         messageId,
         tokenAccumulator
@@ -507,7 +504,7 @@ const handleChatCompletionsRequest = async (req: Request, res: Response) => {
         model: anthropicRequest.model,
         ...tokenAccumulator,
         duration_ms: Date.now() - startTime,
-        status: response.status,
+        status: result.status,
         stream: true,
         request_id: requestId,
       });
@@ -517,15 +514,15 @@ const handleChatCompletionsRequest = async (req: Request, res: Response) => {
         timestamp,
         modifiedRequest,
         hadSystemPrompt,
-        { status: response.status, data: undefined },
+        { status: result.status, data: undefined },
         undefined,
         'openai'
       );
     } else {
       // Handle non-streaming response
-      if (!response.ok) {
-        const errorData = await response.json();
-        const openaiError = translateAnthropicErrorToOpenAI(errorData);
+      if (result.status >= 400) {
+        const errorData = result.json;
+        const openaiError = translateAnthropicErrorToOpenAI(errorData || { message: 'Backend error' });
 
         logUsage({
           agent,
@@ -538,7 +535,7 @@ const handleChatCompletionsRequest = async (req: Request, res: Response) => {
           cache_read_tokens: 0,
           cache_create_tokens: 0,
           duration_ms: Date.now() - startTime,
-          status: response.status,
+          status: result.status,
           stream: false,
           request_id: requestId,
         });
@@ -548,15 +545,15 @@ const handleChatCompletionsRequest = async (req: Request, res: Response) => {
           timestamp,
           modifiedRequest,
           hadSystemPrompt,
-          { status: response.status, data: errorData as AnthropicResponse },
+          { status: result.status, data: errorData as AnthropicResponse },
           undefined,
           'openai'
         );
-        res.status(response.status).json(openaiError);
+        res.status(result.status).json(openaiError);
         return;
       }
 
-      const anthropicResponse = (await response.json()) as AnthropicResponse;
+      const anthropicResponse = result.json as AnthropicResponse;
       const openaiResponse = translateAnthropicToOpenAI(anthropicResponse, openaiRequest.model);
 
       logUsage({
@@ -570,7 +567,7 @@ const handleChatCompletionsRequest = async (req: Request, res: Response) => {
         cache_read_tokens: anthropicResponse.usage?.cache_read_input_tokens || 0,
         cache_create_tokens: anthropicResponse.usage?.cache_creation_input_tokens || 0,
         duration_ms: Date.now() - startTime,
-        status: response.status,
+        status: result.status,
         stream: false,
         request_id: requestId,
       });
@@ -580,12 +577,12 @@ const handleChatCompletionsRequest = async (req: Request, res: Response) => {
         timestamp,
         modifiedRequest,
         hadSystemPrompt,
-        { status: response.status, data: anthropicResponse },
+        { status: result.status, data: anthropicResponse },
         undefined,
         'openai'
       );
 
-      res.status(response.status).json(openaiResponse);
+      res.status(result.status).json(openaiResponse);
     }
   } catch (error) {
     // Log the error
@@ -662,47 +659,56 @@ async function startRouter() {
   // Initialize usage tracking (requires USAGE_DB_URL env var)
   initUsageTracker();
 
-  // Check if we have tokens
-  let tokens = await loadTokens();
-
-  if (!tokens && !endpointConfig.allowBearerPassthrough) {
-    // OAuth is required when bearer passthrough is disabled
-    logger.startup('No OAuth tokens found. Starting authentication...');
-    logger.startup('');
-
-    try {
-      const { code, verifier, state } = await startOAuthFlow(askQuestion);
-      logger.startup('✅ Authorization received');
-      logger.startup('🔄 Exchanging for tokens...\n');
-
-      const newTokens = await exchangeCodeForTokens(code, verifier, state);
-      await saveTokens(newTokens);
-      tokens = newTokens;
-
-      logger.startup('✅ Authentication successful!');
-      logger.startup('');
-    } catch (error) {
-      logger.error('❌ Authentication failed:', error instanceof Error ? error.message : error);
-      rl.close();
-      process.exit(1);
-    }
+  if (isCli) {
+    // CLI backend — no OAuth needed, claude CLI handles its own auth
+    logger.startup(`🔧 Backend: CLI (claude -p)`);
+    logger.startup('✅ Using Claude Code CLI subscription auth.');
   } else {
-    logger.startup('✅ OAuth tokens found.');
-  }
+    // API backend — need OAuth tokens
+    logger.startup(`🔧 Backend: API (Anthropic HTTP)`);
 
-  // Validate/refresh token (skip if no tokens and passthrough is enabled)
-  if (tokens) {
-    try {
-      await getValidAccessToken();
-      logger.startup('✅ Token validated.');
-    } catch (error) {
-      logger.error('❌ Token validation failed:', error);
-      logger.info('Please delete .oauth-tokens.json and restart.');
-      rl.close();
-      process.exit(1);
+    // Check if we have tokens
+    let tokens = await loadTokens();
+
+    if (!tokens && !endpointConfig.allowBearerPassthrough) {
+      // OAuth is required when bearer passthrough is disabled
+      logger.startup('No OAuth tokens found. Starting authentication...');
+      logger.startup('');
+
+      try {
+        const { code, verifier, state } = await startOAuthFlow(askQuestion);
+        logger.startup('✅ Authorization received');
+        logger.startup('🔄 Exchanging for tokens...\n');
+
+        const newTokens = await exchangeCodeForTokens(code, verifier, state);
+        await saveTokens(newTokens);
+        tokens = newTokens;
+
+        logger.startup('✅ Authentication successful!');
+        logger.startup('');
+      } catch (error) {
+        logger.error('❌ Authentication failed:', error instanceof Error ? error.message : error);
+        rl.close();
+        process.exit(1);
+      }
+    } else {
+      logger.startup('✅ OAuth tokens found.');
     }
-  } else if (endpointConfig.allowBearerPassthrough) {
-    logger.startup('⚠️  No OAuth tokens - bearer passthrough mode only');
+
+    // Validate/refresh token (skip if no tokens and passthrough is enabled)
+    if (tokens) {
+      try {
+        await getValidAccessToken();
+        logger.startup('✅ Token validated.');
+      } catch (error) {
+        logger.error('❌ Token validation failed:', error);
+        logger.info('Please delete .oauth-tokens.json and restart.');
+        rl.close();
+        process.exit(1);
+      }
+    } else if (endpointConfig.allowBearerPassthrough) {
+      logger.startup('⚠️  No OAuth tokens - bearer passthrough mode only');
+    }
   }
 
   // Close readline interface since we don't need it anymore
@@ -749,15 +755,23 @@ async function startRouter() {
   });
 }
 
-// Graceful shutdown — drain usage tracker pool
+// Graceful shutdown — drain usage tracker pool and kill CLI processes
+async function shutdown() {
+  await shutdownUsageTracker();
+  if (isCli) {
+    const { shutdownCliBackend } = await import('./cli-backend.js');
+    shutdownCliBackend();
+  }
+}
+
 process.on('SIGTERM', async () => {
   logger.info('SIGTERM received, shutting down...');
-  await shutdownUsageTracker();
+  await shutdown();
   process.exit(0);
 });
 process.on('SIGINT', async () => {
   logger.info('SIGINT received, shutting down...');
-  await shutdownUsageTracker();
+  await shutdown();
   process.exit(0);
 });
 
