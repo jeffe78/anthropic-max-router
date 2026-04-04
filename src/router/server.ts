@@ -198,8 +198,9 @@ const isOpenAI = backendType === 'openai';
 app.use(express.json({ limit: '50mb' }));
 
 // Health check endpoint
+const backendDisplayName = backendType === 'openai' ? 'OpenAI Sub' : backendType === 'cli' ? 'Anthropic CLI' : 'Anthropic Max Pro';
 app.get('/health', (_req: Request, res: Response) => {
-  res.json({ status: 'ok', service: 'anthropic-max-plan-router', account: process.env.ACCOUNT_LABEL || 'default', backend: backendType });
+  res.json({ status: 'ok', service: 'anthropic-max-plan-router', account: process.env.ACCOUNT_LABEL || 'default', backend: backendDisplayName });
 });
 
 // OpenAI Models endpoint - proxy to Anthropic API with API key
