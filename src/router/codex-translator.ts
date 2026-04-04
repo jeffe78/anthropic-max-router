@@ -104,9 +104,8 @@ export function translateAnthropicToCodex(request: AnthropicRequest): CodexRespo
     store: false,
   };
 
-  if (instructions) {
-    codexRequest.instructions = instructions;
-  }
+  // Codex Responses API requires instructions — use a default if none provided
+  codexRequest.instructions = instructions || 'You are a helpful assistant.';
 
   if (tools) {
     codexRequest.tools = tools;
