@@ -1,5 +1,14 @@
 FROM node:22-slim
 WORKDIR /app
+
+# Install Claude CLI binary directly (needed for BACKEND=cli mode)
+RUN apt-get update && apt-get install -y curl && \
+    GCS_BUCKET="https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases" && \
+    VERSION=$(curl -fsSL "$GCS_BUCKET/latest") && \
+    curl -fsSL "$GCS_BUCKET/$VERSION/linux-x64/claude" -o /usr/local/bin/claude && \
+    chmod +x /usr/local/bin/claude && \
+    apt-get remove -y curl && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
+
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 COPY dist/ ./dist/
