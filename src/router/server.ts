@@ -4,6 +4,8 @@ import express, { Request, Response } from 'express';
 import readline from 'readline';
 import { getValidAccessToken, loadTokens, saveTokens } from '../token-manager.js';
 import { startOAuthFlow, exchangeCodeForTokens } from '../oauth.js';
+import { getValidOpenAIAccessToken, loadOpenAITokens, saveOpenAITokens } from '../openai-token-manager.js';
+import { startOpenAIOAuthFlow, exchangeOpenAICodeForTokens } from '../openai-oauth.js';
 import { ensureRequiredSystemPrompt, stripUnknownFields } from './middleware.js';
 import { AnthropicRequest, AnthropicResponse, OpenAIChatCompletionRequest, BackendExecutor } from '../types.js';
 import { logger } from './logger.js';
@@ -148,6 +150,7 @@ Options:
   Backend selection (default: api):
   --backend api                 Use Anthropic API backend (default)
   --backend cli                 Use Claude Code CLI backend (claude -p)
+  --backend openai              Use OpenAI Codex backend (ChatGPT subscription)
 
   Verbosity levels (default: medium):
   -q, --quiet               Quiet mode - no request logging
@@ -158,7 +161,10 @@ Options:
 Environment variables:
   ROUTER_PORT               Port to listen on (default: 3000)
   ANTHROPIC_DEFAULT_MODEL   Override model mapping (e.g., claude-haiku-4-5)
-  BACKEND                   Backend type: "api" (default) or "cli"
+  BACKEND                   Backend type: "api" (default), "cli", or "openai"
+  OPENAI_API_URL            OpenAI Responses API URL (default: https://api.openai.com/v1/responses)
+  OPENAI_DEFAULT_MODEL      Default model for OpenAI backend (default: gpt-4.1)
+  OPENAI_TOKEN_FILE_PATH    OpenAI OAuth token file (default: .openai-oauth-tokens.json)
   CLI_BARE_MODE             Set to "true" to skip hooks/CLAUDE.md in CLI backend
   CLI_TIMEOUT               CLI process timeout in ms (default: 300000)
   CLI_SESSION_TTL           CLI session TTL in ms (default: 3600000)
@@ -186,6 +192,7 @@ const app = express();
 const backend: BackendExecutor = getBackend();
 const backendType = getBackendType();
 const isCli = backendType === 'cli';
+const isOpenAI = backendType === 'openai';
 
 // Parse JSON request bodies with increased limit for large payloads
 app.use(express.json({ limit: '50mb' }));
@@ -274,15 +281,18 @@ const handleMessagesRequest = async (req: Request, res: Response) => {
         }
       } else {
         // Get a valid OAuth access token (auto-refreshes if needed)
-        accessToken = await getValidAccessToken();
+        accessToken = isOpenAI ? await getValidOpenAIAccessToken() : await getValidAccessToken();
         if (logger['level'] === 'maximum') {
-          logger.info(`[OAuth] Using router OAuth token for request ${requestId}`);
+          logger.info(`[OAuth] Using router ${isOpenAI ? 'OpenAI' : 'Anthropic'} token for request ${requestId}`);
         }
       }
     }
 
+    // For OpenAI backend, skip system prompt injection (not needed for OpenAI)
+    const finalRequest = isOpenAI ? originalRequest : modifiedRequest;
+
     // Execute via the configured backend (API fetch or CLI spawn)
-    const result = await backend(modifiedRequest, { requestId, accessToken });
+    const result = await backend(finalRequest, { requestId, accessToken });
 
     // Forward the status code and response
     if (result.isStream && result.stream) {
@@ -460,15 +470,18 @@ const handleChatCompletionsRequest = async (req: Request, res: Response) => {
         }
       } else {
         // Get a valid OAuth access token (auto-refreshes if needed)
-        accessToken = await getValidAccessToken();
+        accessToken = isOpenAI ? await getValidOpenAIAccessToken() : await getValidAccessToken();
         if (logger['level'] === 'maximum') {
-          logger.info(`[OAuth] Using router OAuth token for request ${requestId}`);
+          logger.info(`[OAuth] Using router ${isOpenAI ? 'OpenAI' : 'Anthropic'} token for request ${requestId}`);
         }
       }
     }
 
+    // For OpenAI backend, skip system prompt injection (not needed for OpenAI)
+    const finalRequest = isOpenAI ? anthropicRequest : modifiedRequest;
+
     // Execute via the configured backend (API fetch or CLI spawn)
-    const result = await backend(modifiedRequest, { requestId, accessToken });
+    const result = await backend(finalRequest, { requestId, accessToken });
 
     // Handle streaming responses
     if (openaiRequest.stream && result.isStream && result.stream) {
@@ -663,6 +676,49 @@ async function startRouter() {
     // CLI backend — no OAuth needed, claude CLI handles its own auth
     logger.startup(`🔧 Backend: CLI (claude -p)`);
     logger.startup('✅ Using Claude Code CLI subscription auth.');
+  } else if (isOpenAI) {
+    // OpenAI backend — need OpenAI OAuth tokens
+    logger.startup(`🔧 Backend: OpenAI Codex (Responses API)`);
+
+    let tokens = await loadOpenAITokens();
+
+    if (!tokens && !endpointConfig.allowBearerPassthrough) {
+      logger.startup('No OpenAI OAuth tokens found. Starting authentication...');
+      logger.startup('');
+
+      try {
+        const { code, verifier } = await startOpenAIOAuthFlow(askQuestion);
+        logger.startup('✅ Authorization received');
+        logger.startup('🔄 Exchanging for tokens...\n');
+
+        const newTokens = await exchangeOpenAICodeForTokens(code, verifier);
+        await saveOpenAITokens(newTokens);
+        tokens = newTokens;
+
+        logger.startup('✅ OpenAI authentication successful!');
+        logger.startup('');
+      } catch (error) {
+        logger.error('❌ OpenAI authentication failed:', error instanceof Error ? error.message : error);
+        rl.close();
+        process.exit(1);
+      }
+    } else {
+      logger.startup('✅ OpenAI OAuth tokens found.');
+    }
+
+    if (tokens) {
+      try {
+        await getValidOpenAIAccessToken();
+        logger.startup('✅ OpenAI token validated.');
+      } catch (error) {
+        logger.error('❌ OpenAI token validation failed:', error);
+        logger.info('Please delete token file and restart.');
+        rl.close();
+        process.exit(1);
+      }
+    } else if (endpointConfig.allowBearerPassthrough) {
+      logger.startup('⚠️  No OpenAI tokens - bearer passthrough mode only');
+    }
   } else {
     // API backend — need OAuth tokens
     logger.startup(`🔧 Backend: API (Anthropic HTTP)`);

@@ -67,6 +67,18 @@ export function getBackend(): BackendExecutor {
     };
   }
 
+  if (backendType === 'openai') {
+    // Lazy import to avoid loading OpenAI deps when not needed
+    let openaiBackendFn: BackendExecutor | null = null;
+    return async (request, options) => {
+      if (!openaiBackendFn) {
+        const mod = await import('./openai-backend.js');
+        openaiBackendFn = mod.openaiBackend;
+      }
+      return openaiBackendFn(request, options);
+    };
+  }
+
   if (backendType !== 'api') {
     logger.info(`Unknown BACKEND="${backendType}", falling back to "api"`);
   }

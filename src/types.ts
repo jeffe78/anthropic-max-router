@@ -331,3 +331,92 @@ export interface BackendOptions {
   requestId: string;
   accessToken?: string;
 }
+
+/**
+ * OpenAI Codex Responses API types
+ */
+
+/** Input item for the Responses API */
+export interface CodexInputItem {
+  type?: 'message';
+  role: 'user' | 'assistant' | 'system';
+  content: string | CodexContentPart[];
+}
+
+/** Content part within a Codex input item */
+export interface CodexContentPart {
+  type: 'input_text' | 'output_text';
+  text: string;
+}
+
+/** Tool definition for the Responses API */
+export interface CodexToolDefinition {
+  type: 'function';
+  name: string;
+  description: string;
+  parameters: {
+    type: 'object';
+    properties: Record<string, unknown>;
+    required?: string[];
+  };
+}
+
+/** Request body for POST /v1/responses */
+export interface CodexResponsesRequest {
+  model: string;
+  instructions?: string;
+  input: string | CodexInputItem[];
+  stream?: boolean;
+  tools?: CodexToolDefinition[];
+  tool_choice?: 'auto' | 'none' | 'required';
+  max_output_tokens?: number;
+  temperature?: number;
+  top_p?: number;
+  store?: boolean;
+}
+
+/** Output item from the Responses API */
+export interface CodexOutputItem {
+  type: 'message';
+  id: string;
+  role: 'assistant';
+  content: CodexOutputContentPart[];
+  status?: string;
+}
+
+/** Content part within a Codex output item */
+export interface CodexOutputContentPart {
+  type: 'output_text';
+  text: string;
+}
+
+/** Non-streaming response from POST /v1/responses */
+export interface CodexResponsesResponse {
+  id: string;
+  object: 'response';
+  created_at: number;
+  model: string;
+  output: CodexOutputItem[];
+  usage: {
+    input_tokens: number;
+    output_tokens: number;
+    total_tokens: number;
+  };
+  status: 'completed' | 'failed' | 'cancelled';
+  error?: {
+    code: string;
+    message: string;
+  };
+}
+
+/** OpenAI OAuth tokens (slightly different shape from Anthropic) */
+export interface OpenAIOAuthTokens {
+  access_token: string;
+  refresh_token: string;
+  id_token?: string;
+  expires_in: number;
+  token_type: string;
+  scope?: string;
+  expires_at?: number;
+  created_at?: string;
+}
