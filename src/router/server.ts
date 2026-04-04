@@ -193,6 +193,7 @@ const backend: BackendExecutor = getBackend();
 const backendType = getBackendType();
 const isCli = backendType === 'cli';
 const isOpenAI = backendType === 'openai';
+const isOllamaBackend = backendType === 'ollama';
 
 // Parse JSON request bodies with increased limit for large payloads
 app.use(express.json({ limit: '50mb' }));
@@ -271,7 +272,7 @@ const handleMessagesRequest = async (req: Request, res: Response) => {
 
     // Determine which authentication method to use (skip for CLI backend)
     let accessToken: string | undefined;
-    if (!isCli) {
+    if (!isCli && !isOllamaBackend) {
       const clientBearerToken = extractBearerToken(req);
       const usePassthrough = endpointConfig.allowBearerPassthrough && clientBearerToken !== null;
 
@@ -289,8 +290,8 @@ const handleMessagesRequest = async (req: Request, res: Response) => {
       }
     }
 
-    // For OpenAI backend, skip system prompt injection (not needed for OpenAI)
-    const finalRequest = isOpenAI ? originalRequest : modifiedRequest;
+    // For OpenAI/Ollama backend, skip system prompt injection
+    const finalRequest = (isOpenAI || isOllamaBackend) ? originalRequest : modifiedRequest;
 
     // Execute via the configured backend (API fetch or CLI spawn)
     const result = await backend(finalRequest, { requestId, accessToken });
@@ -460,7 +461,7 @@ const handleChatCompletionsRequest = async (req: Request, res: Response) => {
 
     // Determine which authentication method to use (skip for CLI backend)
     let accessToken: string | undefined;
-    if (!isCli) {
+    if (!isCli && !isOllamaBackend) {
       const clientBearerToken = extractBearerToken(req);
       const usePassthrough = endpointConfig.allowBearerPassthrough && clientBearerToken !== null;
 
@@ -479,7 +480,7 @@ const handleChatCompletionsRequest = async (req: Request, res: Response) => {
     }
 
     // For OpenAI backend, skip system prompt injection (not needed for OpenAI)
-    const finalRequest = isOpenAI ? anthropicRequest : modifiedRequest;
+    const finalRequest = (isOpenAI || isOllamaBackend) ? anthropicRequest : modifiedRequest;
 
     // Execute via the configured backend (API fetch or CLI spawn)
     const result = await backend(finalRequest, { requestId, accessToken });
