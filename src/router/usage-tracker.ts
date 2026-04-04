@@ -192,7 +192,8 @@ export function parseStreamTokens(
 // Client resolution
 // ---------------------------------------------------------------------------
 
-function resolveClient(fp: Fingerprint): string {
+function resolveClient(fp: Fingerprint, agent: string | null): string {
+  if (agent) return agent;
   if (fp.endpoint === 'openai') return 'ynab-categorizer';
   if (fp.has_images && !fp.system_prefix) return 'lastwar-automation';
   if (fp.system_prefix.includes('<instructions>') && fp.system_prefix.includes('Plan out actions')) return 'magnitude';
@@ -213,7 +214,7 @@ export async function logUsage(record: UsageRecord): Promise<void> {
   try {
     // Embed the fingerprint text (async, but we await to get the vector before INSERT)
     const embedding = await embed(record.fingerprint_text);
-    const client = resolveClient(record.fingerprint);
+    const client = resolveClient(record.fingerprint, record.agent);
 
     await pool.query(
       `INSERT INTO max_proxy_usage
