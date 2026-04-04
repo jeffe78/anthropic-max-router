@@ -184,6 +184,11 @@ export function parseStreamTokens(
     const usage = event.usage as Record<string, number> | undefined;
     if (usage) {
       accumulator.output_tokens = usage.output_tokens || 0;
+      // Non-API backends (CLI, OpenAI, Ollama) emit input_tokens here
+      // since the count isn't known until after the stream completes
+      if (usage.input_tokens) {
+        accumulator.input_tokens = usage.input_tokens;
+      }
     }
   }
 }

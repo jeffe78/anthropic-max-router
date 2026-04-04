@@ -49,6 +49,10 @@ async function bufferStreamToResponse(
           text += event.delta.text;
         } else if (event.type === 'message_delta' && event.usage) {
           outputTokens = event.usage.output_tokens || 0;
+          // Codex translator emits input_tokens here since it's not known at message_start
+          if (event.usage.input_tokens) {
+            inputTokens = event.usage.input_tokens;
+          }
         }
       } catch {
         // Ignore parse errors

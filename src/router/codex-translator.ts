@@ -262,11 +262,12 @@ export async function* translateCodexStreamToAnthropic(
   );
 
   // Emit message_delta with stop reason and usage
+  // Include input_tokens here since message_start was emitted before we knew the count
   yield encoder.encode(
     `event: message_delta\ndata: ${JSON.stringify({
       type: 'message_delta',
       delta: { stop_reason: 'end_turn', stop_sequence: null },
-      usage: { output_tokens: totalOutputTokens },
+      usage: { input_tokens: totalInputTokens, output_tokens: totalOutputTokens },
     })}\n\n`
   );
 

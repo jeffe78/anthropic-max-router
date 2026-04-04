@@ -168,11 +168,12 @@ async function* translateOllamaStreamToAnthropic(
   );
 
   // Emit message_delta with usage
+  // Include input_tokens here since message_start was emitted before we knew the count
   yield encoder.encode(
     `event: message_delta\ndata: ${JSON.stringify({
       type: 'message_delta',
       delta: { stop_reason: 'end_turn', stop_sequence: null },
-      usage: { output_tokens: outputTokens },
+      usage: { input_tokens: inputTokens, output_tokens: outputTokens },
     })}\n\n`,
   );
 
