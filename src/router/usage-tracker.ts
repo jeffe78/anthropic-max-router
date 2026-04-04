@@ -189,6 +189,21 @@ export function parseStreamTokens(
 }
 
 // ---------------------------------------------------------------------------
+// Client resolution
+// ---------------------------------------------------------------------------
+
+function resolveClient(fp: Fingerprint): string {
+  if (fp.endpoint === 'openai') return 'ynab-categorizer';
+  if (fp.has_images && !fp.system_prefix) return 'lastwar-automation';
+  if (fp.system_prefix.includes('<instructions>') && fp.system_prefix.includes('Plan out actions')) return 'magnitude';
+  const agentMatch = fp.system_prefix.match(/agent=(\S+)/);
+  if (agentMatch) return agentMatch[1];
+  const localIps = ['127.0.0.1', '::1', '::ffff:127.0.0.1'];
+  if (!localIps.includes(fp.source_ip)) return 'magnitude';
+  return 'unknown';
+}
+
+// ---------------------------------------------------------------------------
 // Log to Postgres (fire-and-forget)
 // ---------------------------------------------------------------------------
 
@@ -198,14 +213,15 @@ export async function logUsage(record: UsageRecord): Promise<void> {
   try {
     // Embed the fingerprint text (async, but we await to get the vector before INSERT)
     const embedding = await embed(record.fingerprint_text);
+    const client = resolveClient(record.fingerprint);
 
     await pool.query(
       `INSERT INTO max_proxy_usage
         (agent, automation, model, input_tokens, output_tokens,
          cache_read_tokens, cache_create_tokens, duration_ms, status, stream,
          request_id, source_ip, endpoint, has_images, system_prompt,
-         tool_names, message_count, fingerprint_text, embedding, account, instance)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)`,
+         tool_names, message_count, fingerprint_text, embedding, account, instance, client)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)`,
       [
         record.agent,
         record.automation,
@@ -228,6 +244,7 @@ export async function logUsage(record: UsageRecord): Promise<void> {
         embedding ? `[${embedding.join(',')}]` : null,
         process.env.ACCOUNT_LABEL || null,
         process.env.INSTANCE_LABEL || null,
+        client,
       ]
     );
   } catch (err) {
