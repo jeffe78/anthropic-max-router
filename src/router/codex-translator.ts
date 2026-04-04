@@ -22,7 +22,7 @@ import {
 /**
  * Default model for OpenAI Codex backend
  */
-const DEFAULT_CODEX_MODEL = process.env.OPENAI_DEFAULT_MODEL || 'gpt-4.1';
+const DEFAULT_CODEX_MODEL = process.env.OPENAI_DEFAULT_MODEL || 'gpt-5.3-codex';
 
 /**
  * Translate an Anthropic Messages request into a Codex Responses API request.
