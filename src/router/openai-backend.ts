@@ -89,6 +89,7 @@ export async function openaiBackend(
   const codexRequest = translateAnthropicToCodex(request);
 
   logger.info(`[openai] ${options.requestId} → ${CODEX_API_URL} model=${codexRequest.model} clientStream=${clientWantsStream}`);
+  logger.info(`[openai] ${options.requestId} OUTBOUND BODY:\n${JSON.stringify(codexRequest, null, 2)}`);
 
   const response = await fetch(CODEX_API_URL, {
     method: 'POST',
