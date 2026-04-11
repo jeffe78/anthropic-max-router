@@ -58,7 +58,7 @@ export interface Message {
  * Content block for messages
  */
 export interface ContentBlock {
-  type: 'text' | 'tool_use' | 'tool_result';
+  type: 'text' | 'image' | 'tool_use' | 'tool_result';
   text?: string;
   [key: string]: unknown;
 }
@@ -324,7 +324,7 @@ export interface BackendResult {
 
 export type BackendExecutor = (
   request: AnthropicRequest,
-  options: BackendOptions,
+  options: BackendOptions
 ) => Promise<BackendResult>;
 
 export interface BackendOptions {

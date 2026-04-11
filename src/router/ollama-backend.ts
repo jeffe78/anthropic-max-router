@@ -7,17 +7,64 @@
  * and responses are translated back to Anthropic format.
  */
 
-import { AnthropicRequest, AnthropicResponse, BackendResult, BackendOptions, ContentBlock } from '../types.js';
+import {
+  AnthropicRequest,
+  AnthropicResponse,
+  BackendResult,
+  BackendOptions,
+  ContentBlock,
+} from '../types.js';
 import { logger } from './logger.js';
 
 const OLLAMA_URL = process.env.OLLAMA_URL || 'http://localhost:11434';
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'gemma4:26b-a4b-it-q8_0';
 
 /**
+ * OpenAI-compatible content part. Ollama's /v1/chat/completions accepts the
+ * standard OpenAI multimodal content array shape: text parts and image_url
+ * parts. When a message has only text, we still emit a plain string for
+ * back-compat with older Ollama versions.
+ */
+type OpenAIContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string } };
+
+/**
+ * Translate a single Anthropic content block into an OpenAI content part.
+ * Returns null for unsupported block types (tool_use, tool_result), which
+ * the caller drops — tool translation is not yet implemented in this backend.
+ */
+function translateContentBlock(block: ContentBlock): OpenAIContentPart | null {
+  if (block.type === 'text') {
+    return { type: 'text', text: block.text || '' };
+  }
+  if (block.type === 'image') {
+    // Anthropic image block: { type: "image", source: { type: "base64", media_type, data } }
+    //                    or: { type: "image", source: { type: "url", url } }
+    const source = block.source as
+      | { type: 'base64'; media_type: string; data: string }
+      | { type: 'url'; url: string }
+      | undefined;
+    if (!source) return null;
+    if (source.type === 'base64') {
+      return {
+        type: 'image_url',
+        image_url: { url: `data:${source.media_type};base64,${source.data}` },
+      };
+    }
+    if (source.type === 'url') {
+      return { type: 'image_url', image_url: { url: source.url } };
+    }
+    return null;
+  }
+  return null;
+}
+
+/**
  * Convert Anthropic request to OpenAI Chat Completions format for Ollama.
  */
 function translateToOllamaRequest(request: AnthropicRequest) {
-  const messages: Array<{ role: string; content: string }> = [];
+  const messages: Array<{ role: string; content: string | OpenAIContentPart[] }> = [];
 
   // System messages
   if (request.system && request.system.length > 0) {
@@ -27,14 +74,24 @@ function translateToOllamaRequest(request: AnthropicRequest) {
 
   // Conversation messages
   for (const msg of request.messages) {
-    const content =
-      typeof msg.content === 'string'
-        ? msg.content
-        : msg.content
-            .filter((b) => b.type === 'text')
-            .map((b) => b.text || '')
-            .join('');
-    messages.push({ role: msg.role, content });
+    if (typeof msg.content === 'string') {
+      messages.push({ role: msg.role, content: msg.content });
+      continue;
+    }
+
+    const parts = msg.content
+      .map(translateContentBlock)
+      .filter((p): p is OpenAIContentPart => p !== null);
+
+    // If every part is text, collapse to a plain string for back-compat.
+    // Otherwise emit the full multimodal parts array (required for image_url).
+    const hasNonText = parts.some((p) => p.type !== 'text');
+    if (!hasNonText) {
+      const text = parts.map((p) => (p as { type: 'text'; text: string }).text).join('');
+      messages.push({ role: msg.role, content: text });
+    } else {
+      messages.push({ role: msg.role, content: parts });
+    }
   }
 
   return {
@@ -53,10 +110,12 @@ function translateFromOllamaResponse(ollamaResp: Record<string, unknown>): Anthr
     message?: { content?: string; reasoning?: string };
     finish_reason?: string;
   }>;
-  const usage = ollamaResp.usage as {
-    prompt_tokens?: number;
-    completion_tokens?: number;
-  } | undefined;
+  const usage = ollamaResp.usage as
+    | {
+        prompt_tokens?: number;
+        completion_tokens?: number;
+      }
+    | undefined;
 
   const content = choices?.[0]?.message?.content || '';
   const reasoning = choices?.[0]?.message?.reasoning || '';
@@ -87,7 +146,7 @@ function translateFromOllamaResponse(ollamaResp: Record<string, unknown>): Anthr
  */
 async function* translateOllamaStreamToAnthropic(
   stream: AsyncIterable<Uint8Array>,
-  model: string,
+  model: string
 ): AsyncIterable<Uint8Array> {
   const encoder = new TextEncoder();
   const decoder = new TextDecoder();
@@ -110,7 +169,7 @@ async function* translateOllamaStreamToAnthropic(
         stop_sequence: null,
         usage: { input_tokens: 0, output_tokens: 0 },
       },
-    })}\n\n`,
+    })}\n\n`
   );
 
   // Emit content_block_start
@@ -119,7 +178,7 @@ async function* translateOllamaStreamToAnthropic(
       type: 'content_block_start',
       index: 0,
       content_block: { type: 'text', text: '' },
-    })}\n\n`,
+    })}\n\n`
   );
 
   for await (const chunk of stream) {
@@ -150,7 +209,7 @@ async function* translateOllamaStreamToAnthropic(
               type: 'content_block_delta',
               index: 0,
               delta: { type: 'text_delta', text: textDelta },
-            })}\n\n`,
+            })}\n\n`
           );
         }
       } catch {
@@ -164,7 +223,7 @@ async function* translateOllamaStreamToAnthropic(
     `event: content_block_stop\ndata: ${JSON.stringify({
       type: 'content_block_stop',
       index: 0,
-    })}\n\n`,
+    })}\n\n`
   );
 
   // Emit message_delta with usage
@@ -174,12 +233,12 @@ async function* translateOllamaStreamToAnthropic(
       type: 'message_delta',
       delta: { stop_reason: 'end_turn', stop_sequence: null },
       usage: { input_tokens: inputTokens, output_tokens: outputTokens },
-    })}\n\n`,
+    })}\n\n`
   );
 
   // Emit message_stop
   yield encoder.encode(
-    `event: message_stop\ndata: ${JSON.stringify({ type: 'message_stop' })}\n\n`,
+    `event: message_stop\ndata: ${JSON.stringify({ type: 'message_stop' })}\n\n`
   );
 }
 
@@ -188,13 +247,13 @@ async function* translateOllamaStreamToAnthropic(
  */
 export async function ollamaBackend(
   request: AnthropicRequest,
-  options: BackendOptions,
+  options: BackendOptions
 ): Promise<BackendResult> {
   const ollamaRequest = translateToOllamaRequest(request);
   const url = `${OLLAMA_URL}/v1/chat/completions`;
 
   logger.info(
-    `[ollama] ${options.requestId} → ${url} model=${ollamaRequest.model} stream=${ollamaRequest.stream}`,
+    `[ollama] ${options.requestId} → ${url} model=${ollamaRequest.model} stream=${ollamaRequest.stream}`
   );
 
   const response = await fetch(url, {
@@ -214,13 +273,12 @@ export async function ollamaBackend(
     throw new Error(`Ollama error ${response.status}: ${errorBody}`);
   }
 
-  const isStream =
-    response.headers.get('content-type')?.includes('text/event-stream') ?? false;
+  const isStream = response.headers.get('content-type')?.includes('text/event-stream') ?? false;
 
   if (isStream) {
     const anthropicStream = translateOllamaStreamToAnthropic(
       response.body as AsyncIterable<Uint8Array>,
-      ollamaRequest.model,
+      ollamaRequest.model
     );
     return { status: 200, isStream: true, stream: anthropicStream };
   } else {
