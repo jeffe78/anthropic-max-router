@@ -3,11 +3,21 @@
 import express, { Request, Response } from 'express';
 import readline from 'readline';
 import { getValidAccessToken, loadTokens, saveTokens } from '../token-manager.js';
+import { startCliCredentialsWatcher } from '../cli-credentials-watcher.js';
 import { startOAuthFlow, exchangeCodeForTokens } from '../oauth.js';
-import { getValidOpenAIAccessToken, loadOpenAITokens, saveOpenAITokens } from '../openai-token-manager.js';
+import {
+  getValidOpenAIAccessToken,
+  loadOpenAITokens,
+  saveOpenAITokens,
+} from '../openai-token-manager.js';
 import { startOpenAIOAuthFlow, exchangeOpenAICodeForTokens } from '../openai-oauth.js';
 import { ensureRequiredSystemPrompt, stripUnknownFields } from './middleware.js';
-import { AnthropicRequest, AnthropicResponse, OpenAIChatCompletionRequest, BackendExecutor } from '../types.js';
+import {
+  AnthropicRequest,
+  AnthropicResponse,
+  OpenAIChatCompletionRequest,
+  BackendExecutor,
+} from '../types.js';
 import { logger } from './logger.js';
 import {
   translateOpenAIToAnthropic,
@@ -199,9 +209,21 @@ const isOllamaBackend = backendType === 'ollama';
 app.use(express.json({ limit: '50mb' }));
 
 // Health check endpoint
-const backendDisplayName = backendType === 'ollama' ? (process.env.OLLAMA_ACCOUNT_LABEL || 'Ollama') : backendType === 'openai' ? 'OpenAI Sub' : backendType === 'cli' ? 'Anthropic CLI' : 'Anthropic Max Pro';
+const backendDisplayName =
+  backendType === 'ollama'
+    ? process.env.OLLAMA_ACCOUNT_LABEL || 'Ollama'
+    : backendType === 'openai'
+      ? 'OpenAI Sub'
+      : backendType === 'cli'
+        ? 'Anthropic CLI'
+        : 'Anthropic Max Pro';
 app.get('/health', (_req: Request, res: Response) => {
-  res.json({ status: 'ok', service: 'anthropic-max-plan-router', account: process.env.ACCOUNT_LABEL || 'default', backend: backendDisplayName });
+  res.json({
+    status: 'ok',
+    service: 'anthropic-max-plan-router',
+    account: process.env.ACCOUNT_LABEL || 'default',
+    backend: backendDisplayName,
+  });
 });
 
 // OpenAI Models endpoint - proxy to Anthropic API with API key
@@ -285,13 +307,15 @@ const handleMessagesRequest = async (req: Request, res: Response) => {
         // Get a valid OAuth access token (auto-refreshes if needed)
         accessToken = isOpenAI ? await getValidOpenAIAccessToken() : await getValidAccessToken();
         if (logger['level'] === 'maximum') {
-          logger.info(`[OAuth] Using router ${isOpenAI ? 'OpenAI' : 'Anthropic'} token for request ${requestId}`);
+          logger.info(
+            `[OAuth] Using router ${isOpenAI ? 'OpenAI' : 'Anthropic'} token for request ${requestId}`
+          );
         }
       }
     }
 
     // For OpenAI/Ollama backend, skip system prompt injection
-    const finalRequest = (isOpenAI || isOllamaBackend) ? originalRequest : modifiedRequest;
+    const finalRequest = isOpenAI || isOllamaBackend ? originalRequest : modifiedRequest;
 
     // Execute via the configured backend (API fetch or CLI spawn)
     const result = await backend(finalRequest, { requestId, accessToken });
@@ -304,7 +328,12 @@ const handleMessagesRequest = async (req: Request, res: Response) => {
       res.status(result.status);
 
       // Parse streaming events to extract token counts
-      const tokenAccumulator = { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_create_tokens: 0 };
+      const tokenAccumulator = {
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_tokens: 0,
+        cache_create_tokens: 0,
+      };
       const decoder = new TextDecoder();
       let sseBuffer = '';
 
@@ -386,7 +415,11 @@ const handleMessagesRequest = async (req: Request, res: Response) => {
 
     // Log failed request usage (build fingerprint from raw body if possible)
     const errorBody = req.body as AnthropicRequest;
-    const errorFp = extractFingerprint(req, errorBody || { model: 'unknown', max_tokens: 0, messages: [] }, 'anthropic');
+    const errorFp = extractFingerprint(
+      req,
+      errorBody || { model: 'unknown', max_tokens: 0, messages: [] },
+      'anthropic'
+    );
     logUsage({
       agent,
       automation,
@@ -474,13 +507,15 @@ const handleChatCompletionsRequest = async (req: Request, res: Response) => {
         // Get a valid OAuth access token (auto-refreshes if needed)
         accessToken = isOpenAI ? await getValidOpenAIAccessToken() : await getValidAccessToken();
         if (logger['level'] === 'maximum') {
-          logger.info(`[OAuth] Using router ${isOpenAI ? 'OpenAI' : 'Anthropic'} token for request ${requestId}`);
+          logger.info(
+            `[OAuth] Using router ${isOpenAI ? 'OpenAI' : 'Anthropic'} token for request ${requestId}`
+          );
         }
       }
     }
 
     // For OpenAI backend, skip system prompt injection (not needed for OpenAI)
-    const finalRequest = (isOpenAI || isOllamaBackend) ? anthropicRequest : modifiedRequest;
+    const finalRequest = isOpenAI || isOllamaBackend ? anthropicRequest : modifiedRequest;
 
     // Execute via the configured backend (API fetch or CLI spawn)
     const result = await backend(finalRequest, { requestId, accessToken });
@@ -496,7 +531,12 @@ const handleChatCompletionsRequest = async (req: Request, res: Response) => {
       const messageId = `chatcmpl-${requestId}`;
 
       // Parse streaming events to extract token counts
-      const tokenAccumulator = { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_create_tokens: 0 };
+      const tokenAccumulator = {
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_tokens: 0,
+        cache_create_tokens: 0,
+      };
 
       // Translate Anthropic stream to OpenAI format
       for await (const chunk of translateAnthropicStreamToOpenAI(
@@ -537,7 +577,9 @@ const handleChatCompletionsRequest = async (req: Request, res: Response) => {
       // Handle non-streaming response
       if (result.status >= 400) {
         const errorData = result.json;
-        const openaiError = translateAnthropicErrorToOpenAI(errorData || { message: 'Backend error' });
+        const openaiError = translateAnthropicErrorToOpenAI(
+          errorData || { message: 'Backend error' }
+        );
 
         logUsage({
           agent,
@@ -612,7 +654,11 @@ const handleChatCompletionsRequest = async (req: Request, res: Response) => {
     );
 
     const errorBody = req.body as AnthropicRequest;
-    const errorFp = extractFingerprint(req, errorBody || { model: 'unknown', max_tokens: 0, messages: [] }, 'openai');
+    const errorFp = extractFingerprint(
+      req,
+      errorBody || { model: 'unknown', max_tokens: 0, messages: [] },
+      'openai'
+    );
     logUsage({
       agent,
       automation,
@@ -685,6 +731,9 @@ async function startRouter() {
     // CLI backend — no OAuth needed, claude CLI handles its own auth
     logger.startup(`🔧 Backend: CLI (claude -p)`);
     logger.startup('✅ Using Claude Code CLI subscription auth.');
+    // Periodically push refreshed CLI credentials to the K8s Secret so a
+    // fresh pod on a new node can recover without re-auth.
+    startCliCredentialsWatcher();
   } else if (isOpenAI) {
     // OpenAI backend — need OpenAI OAuth tokens
     logger.startup(`🔧 Backend: OpenAI Codex (Responses API)`);
@@ -707,7 +756,10 @@ async function startRouter() {
         logger.startup('✅ OpenAI authentication successful!');
         logger.startup('');
       } catch (error) {
-        logger.error('❌ OpenAI authentication failed:', error instanceof Error ? error.message : error);
+        logger.error(
+          '❌ OpenAI authentication failed:',
+          error instanceof Error ? error.message : error
+        );
         rl.close();
         process.exit(1);
       }

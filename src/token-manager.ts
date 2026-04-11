@@ -16,15 +16,19 @@
 import fs from 'fs/promises';
 import type { OAuthTokens } from './types.js';
 import { refreshAccessToken } from './oauth.js';
+import { syncToSecret } from './k8s-secret-sync.js';
 
 const TOKEN_FILE = process.env.TOKEN_FILE_PATH || '.oauth-tokens.json';
 
 /**
- * Save tokens to file
+ * Save tokens to file (and write through to K8s Secret if running in-cluster).
  */
 export async function saveTokens(tokens: OAuthTokens): Promise<void> {
-  await fs.writeFile(TOKEN_FILE, JSON.stringify(tokens, null, 2), 'utf-8');
+  const json = JSON.stringify(tokens, null, 2);
+  await fs.writeFile(TOKEN_FILE, json, 'utf-8');
   console.log(`✅ Tokens saved to ${TOKEN_FILE}`);
+  // Write-through to K8s Secret. No-op outside cluster, silent on failure.
+  await syncToSecret('oauth-tokens.json', json);
 }
 
 /**

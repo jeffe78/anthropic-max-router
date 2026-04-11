@@ -6,15 +6,20 @@
 import fs from 'fs/promises';
 import type { OpenAIOAuthTokens } from './types.js';
 import { refreshOpenAIAccessToken } from './openai-oauth.js';
+import { syncToSecret } from './k8s-secret-sync.js';
 
-const TOKEN_FILE = process.env.OPENAI_TOKEN_FILE_PATH || process.env.TOKEN_FILE_PATH || '.openai-oauth-tokens.json';
+const TOKEN_FILE =
+  process.env.OPENAI_TOKEN_FILE_PATH || process.env.TOKEN_FILE_PATH || '.openai-oauth-tokens.json';
 
 /**
- * Save tokens to file
+ * Save tokens to file (and write through to K8s Secret if running in-cluster).
  */
 export async function saveOpenAITokens(tokens: OpenAIOAuthTokens): Promise<void> {
-  await fs.writeFile(TOKEN_FILE, JSON.stringify(tokens, null, 2), 'utf-8');
+  const json = JSON.stringify(tokens, null, 2);
+  await fs.writeFile(TOKEN_FILE, json, 'utf-8');
   console.log(`✅ OpenAI tokens saved to ${TOKEN_FILE}`);
+  // Write-through to K8s Secret. No-op outside cluster, silent on failure.
+  await syncToSecret('oauth-tokens.json', json);
 }
 
 /**
