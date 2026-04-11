@@ -119,7 +119,9 @@ export function buildFingerprintText(fp: Fingerprint): string {
 
   parts.push(`endpoint:${fp.endpoint}`);
   parts.push(`model:${fp.model}`);
-  parts.push(`source:${fp.source_ip === '127.0.0.1' || fp.source_ip === '::1' ? 'local' : 'remote'}`);
+  parts.push(
+    `source:${fp.source_ip === '127.0.0.1' || fp.source_ip === '::1' ? 'local' : 'remote'}`
+  );
 
   if (fp.has_images) parts.push('has_images:true');
   if (fp.tool_names.length > 0) parts.push(`tools:${fp.tool_names.join(',')}`);
@@ -139,12 +141,21 @@ export function buildFingerprintText(fp: Fingerprint): string {
 
 const OLLAMA_URL = process.env.OLLAMA_URL || 'http://worldslab.tailb1596.ts.net:11434';
 
+// nomic-embed-text has a 2048-token context window. ~4 chars/token average for
+// English, so 6000 chars leaves a comfortable margin. Some fingerprint_text
+// values exceed 50k chars (openclaw agents with huge tool lists), which causes
+// `the input length exceeds the context length` 500s and silent null embeddings.
+// The prefix carries the most signal for similarity clustering, so a head-truncation
+// is fine.
+const MAX_EMBED_INPUT_CHARS = 6000;
+
 async function embed(text: string): Promise<number[] | null> {
+  const input = text.length > MAX_EMBED_INPUT_CHARS ? text.slice(0, MAX_EMBED_INPUT_CHARS) : text;
   try {
     const resp = await fetch(`${OLLAMA_URL}/api/embeddings`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: 'nomic-embed-text', prompt: text }),
+      body: JSON.stringify({ model: 'nomic-embed-text', prompt: input }),
     });
     if (!resp.ok) {
       logger.error(`Embedding request failed: ${resp.status}`);
@@ -201,7 +212,8 @@ function resolveClient(fp: Fingerprint, agent: string | null): string {
   if (agent) return agent;
   if (fp.endpoint === 'openai') return 'ynab-categorizer';
   if (fp.has_images && !fp.system_prefix) return 'lastwar-automation';
-  if (fp.system_prefix.includes('<instructions>') && fp.system_prefix.includes('Plan out actions')) return 'magnitude';
+  if (fp.system_prefix.includes('<instructions>') && fp.system_prefix.includes('Plan out actions'))
+    return 'magnitude';
   const agentMatch = fp.system_prefix.match(/agent=(\S+)/);
   if (agentMatch) return agentMatch[1];
   const localIps = ['127.0.0.1', '::1', '::ffff:127.0.0.1'];
