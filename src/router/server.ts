@@ -36,6 +36,8 @@ import {
   extractFingerprint,
   buildFingerprintText,
   shutdownUsageTracker,
+  startUsagePolling,
+  stopUsagePolling,
 } from './usage-tracker.js';
 import { getBackend, getBackendType, ANTHROPIC_VERSION } from './backend.js';
 
@@ -833,6 +835,11 @@ async function startRouter() {
 
   logger.startup('');
 
+  // Start usage polling for API backends (they have OAuth tokens)
+  if (!isOllama && !isCli && !isOpenAI) {
+    startUsagePolling();
+  }
+
   // Start the server
   app.listen(PORT, () => {
     logger.startup(`🚀 Router running on http://localhost:${PORT}`);
@@ -874,6 +881,7 @@ async function startRouter() {
 
 // Graceful shutdown — drain usage tracker pool and kill CLI processes
 async function shutdown() {
+  stopUsagePolling();
   await shutdownUsageTracker();
   if (isCli) {
     const { shutdownCliBackend } = await import('./cli-backend.js');

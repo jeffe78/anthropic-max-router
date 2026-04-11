@@ -283,3 +283,99 @@ export async function shutdownUsageTracker(): Promise<void> {
     pool = null;
   }
 }
+
+// ---------------------------------------------------------------------------
+// Usage readings poller — polls /api/oauth/usage and writes to postgres
+// ---------------------------------------------------------------------------
+
+import { getValidAccessToken } from '../token-manager.js';
+
+const USAGE_POLL_INTERVAL = 2 * 60 * 60 * 1000; // 2 hours
+
+interface UsageReading {
+  utilization: number;
+  resets_at: string | null;
+}
+
+interface UsageResponse {
+  five_hour: UsageReading | null;
+  seven_day: UsageReading | null;
+  seven_day_sonnet: UsageReading | null;
+  extra_usage: {
+    monthly_limit: number;
+    used_credits: number;
+  } | null;
+}
+
+async function pollUsageReadings(): Promise<void> {
+  if (!pool) return;
+
+  const account = process.env.ACCOUNT_LABEL;
+  if (!account) {
+    logger.error('Usage poll: ACCOUNT_LABEL not set, skipping');
+    return;
+  }
+
+  try {
+    const token = await getValidAccessToken();
+    const resp = await fetch('https://api.anthropic.com/api/oauth/usage', {
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'anthropic-beta': 'oauth-2025-04-20',
+      },
+    });
+
+    if (!resp.ok) {
+      logger.error(`Usage poll: HTTP ${resp.status} — ${await resp.text()}`);
+      return;
+    }
+
+    const data = (await resp.json()) as UsageResponse;
+
+    await pool.query(
+      `INSERT INTO max_proxy_usage_readings
+        (account, five_hour_pct, five_hour_resets_at,
+         seven_day_pct, seven_day_resets_at,
+         seven_day_sonnet_pct, seven_day_sonnet_resets_at,
+         extra_usage_limit, extra_usage_used)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+      [
+        account,
+        data.five_hour?.utilization ?? null,
+        data.five_hour?.resets_at ?? null,
+        data.seven_day?.utilization ?? null,
+        data.seven_day?.resets_at ?? null,
+        data.seven_day_sonnet?.utilization ?? null,
+        data.seven_day_sonnet?.resets_at ?? null,
+        data.extra_usage?.monthly_limit ?? null,
+        data.extra_usage?.used_credits ?? null,
+      ]
+    );
+
+    logger.info(`📊 Usage reading: ${account} — 5h: ${data.five_hour?.utilization ?? '?'}%, 7d: ${data.seven_day?.utilization ?? '?'}%`);
+  } catch (err) {
+    logger.error('Usage poll failed:', err);
+  }
+}
+
+let usagePollTimer: ReturnType<typeof setInterval> | null = null;
+
+export function startUsagePolling(): void {
+  if (!pool) {
+    logger.startup('⚠️  No DB pool — usage polling disabled');
+    return;
+  }
+
+  // Poll once at startup (after a short delay for token readiness)
+  setTimeout(() => pollUsageReadings(), 10_000);
+
+  usagePollTimer = setInterval(() => pollUsageReadings(), USAGE_POLL_INTERVAL);
+  logger.startup('📊 Usage polling enabled (every 2h)');
+}
+
+export function stopUsagePolling(): void {
+  if (usagePollTimer) {
+    clearInterval(usagePollTimer);
+    usagePollTimer = null;
+  }
+}
