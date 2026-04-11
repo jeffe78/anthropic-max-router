@@ -1,3 +1,12 @@
+# Stage 1: build TypeScript to dist/
+FROM node:22-slim AS builder
+WORKDIR /app
+COPY package.json package-lock.json tsconfig.json ./
+RUN npm ci
+COPY src/ ./src/
+RUN npx tsc
+
+# Stage 2: runtime
 FROM node:22-slim
 WORKDIR /app
 
@@ -11,6 +20,6 @@ RUN apt-get update && apt-get install -y curl && \
 
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
-COPY dist/ ./dist/
+COPY --from=builder /app/dist/ ./dist/
 EXPOSE 3000
 CMD ["node", "dist/router/server.js", "--minimal", "--disable-bearer-passthrough"]
