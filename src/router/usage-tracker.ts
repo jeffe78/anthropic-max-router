@@ -141,13 +141,16 @@ export function buildFingerprintText(fp: Fingerprint): string {
 
 const OLLAMA_URL = process.env.OLLAMA_URL || 'http://worldslab.tailb1596.ts.net:11434';
 
-// nomic-embed-text has a 2048-token context window. ~4 chars/token average for
-// English, so 6000 chars leaves a comfortable margin. Some fingerprint_text
-// values exceed 50k chars (openclaw agents with huge tool lists), which causes
+// nomic-embed-text has a 2048-token context window. fingerprint_text from
+// openclaw agents can exceed 50k chars (huge tool lists), causing
 // `the input length exceeds the context length` 500s and silent null embeddings.
-// The prefix carries the most signal for similarity clustering, so a head-truncation
-// is fine.
-const MAX_EMBED_INPUT_CHARS = 6000;
+// 4000 chars is the safe cap: real production fingerprints (commas + readable
+// tool names) tokenize at ~4 chars/token so 4000 chars ≈ 1000 tokens, well
+// under the 2048 limit. Adversarial content (lots of underscores, long
+// snake_case identifiers) can hit ~2.5 chars/token, so 4000 still leaves
+// margin even in worst-case tokenization. Head-truncation is fine for
+// similarity clustering since the prefix carries the most signal.
+const MAX_EMBED_INPUT_CHARS = 4000;
 
 async function embed(text: string): Promise<number[] | null> {
   const input = text.length > MAX_EMBED_INPUT_CHARS ? text.slice(0, MAX_EMBED_INPUT_CHARS) : text;
