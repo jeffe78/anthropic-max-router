@@ -219,8 +219,7 @@ function resolveClient(fp: Fingerprint, agent: string | null): string {
     return 'magnitude';
   const agentMatch = fp.system_prefix.match(/agent=(\S+)/);
   if (agentMatch) return agentMatch[1];
-  const localIps = ['127.0.0.1', '::1', '::ffff:127.0.0.1'];
-  if (!localIps.includes(fp.source_ip)) return 'magnitude';
+  if (fp.system_prefix.includes('OpenClaw')) return 'openclaw';
   return 'unknown';
 }
 
