@@ -1,4 +1,10 @@
-import { AnthropicRequest, AnthropicResponse, BackendResult, BackendOptions, BackendExecutor } from '../types.js';
+import {
+  AnthropicRequest,
+  AnthropicResponse,
+  BackendResult,
+  BackendOptions,
+  BackendExecutor,
+} from '../types.js';
 import { logger } from './logger.js';
 
 // Anthropic API configuration (shared with server.ts)
@@ -9,11 +15,10 @@ export const ANTHROPIC_BETA =
 
 /**
  * API backend — forwards requests to Anthropic API via HTTP fetch.
- * This is the existing behavior, extracted from server.ts.
  */
 export async function apiBackend(
   request: AnthropicRequest,
-  options: BackendOptions,
+  options: BackendOptions
 ): Promise<BackendResult> {
   if (!options.accessToken) {
     throw new Error('API backend requires an access token');
@@ -64,29 +69,6 @@ export function getBackend(): BackendExecutor {
         cliBackendFn = mod.cliBackend;
       }
       return cliBackendFn(request, options);
-    };
-  }
-
-  if (backendType === 'openai') {
-    // Lazy import to avoid loading OpenAI deps when not needed
-    let openaiBackendFn: BackendExecutor | null = null;
-    return async (request, options) => {
-      if (!openaiBackendFn) {
-        const mod = await import('./openai-backend.js');
-        openaiBackendFn = mod.openaiBackend;
-      }
-      return openaiBackendFn(request, options);
-    };
-  }
-
-  if (backendType === 'ollama') {
-    let ollamaBackendFn: BackendExecutor | null = null;
-    return async (request, options) => {
-      if (!ollamaBackendFn) {
-        const mod = await import('./ollama-backend.js');
-        ollamaBackendFn = mod.ollamaBackend;
-      }
-      return ollamaBackendFn(request, options);
     };
   }
 

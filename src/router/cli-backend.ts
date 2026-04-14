@@ -51,7 +51,9 @@ function buildPrompt(request: AnthropicRequest): string {
 /**
  * Extract text from message content (string or ContentBlock array).
  */
-function extractTextContent(content: string | Array<{ type: string; text?: string; [key: string]: unknown }>): string {
+function extractTextContent(
+  content: string | Array<{ type: string; text?: string; [key: string]: unknown }>
+): string {
   if (typeof content === 'string') {
     return content;
   }
@@ -72,9 +74,7 @@ function buildSystemPrompt(system?: Array<{ type: string; text: string }>): stri
   if (!system || system.length === 0) return null;
 
   const CLAUDE_CODE_PREFIX = 'You are Claude Code';
-  const parts = system
-    .map((s) => s.text)
-    .filter((text) => !text.startsWith(CLAUDE_CODE_PREFIX));
+  const parts = system.map((s) => s.text).filter((text) => !text.startsWith(CLAUDE_CODE_PREFIX));
 
   return parts.length > 0 ? parts.join('\n') : null;
 }
@@ -114,55 +114,63 @@ function synthesizeSSEFromMessage(message: AnthropicResponse): string[] {
   const events: string[] = [];
 
   // message_start
-  events.push(`data: ${JSON.stringify({
-    type: 'message_start',
-    message: {
-      id: message.id,
-      type: 'message',
-      role: 'assistant',
-      content: [],
-      model: message.model,
-      stop_reason: null,
-      stop_sequence: null,
-      usage: { input_tokens: message.usage?.input_tokens || 0, output_tokens: 0 },
-    },
-  })}\n\n`);
+  events.push(
+    `data: ${JSON.stringify({
+      type: 'message_start',
+      message: {
+        id: message.id,
+        type: 'message',
+        role: 'assistant',
+        content: [],
+        model: message.model,
+        stop_reason: null,
+        stop_sequence: null,
+        usage: { input_tokens: message.usage?.input_tokens || 0, output_tokens: 0 },
+      },
+    })}\n\n`
+  );
 
   // Emit content blocks (skip thinking blocks — just emit text)
-  const textBlocks = (message.content || []).filter(
-    (block) => block.type === 'text' && block.text,
-  );
+  const textBlocks = (message.content || []).filter((block) => block.type === 'text' && block.text);
 
   for (let i = 0; i < textBlocks.length; i++) {
     const block = textBlocks[i];
 
     // content_block_start
-    events.push(`data: ${JSON.stringify({
-      type: 'content_block_start',
-      index: i,
-      content_block: { type: 'text', text: '' },
-    })}\n\n`);
+    events.push(
+      `data: ${JSON.stringify({
+        type: 'content_block_start',
+        index: i,
+        content_block: { type: 'text', text: '' },
+      })}\n\n`
+    );
 
     // content_block_delta — emit the full text as one delta
-    events.push(`data: ${JSON.stringify({
-      type: 'content_block_delta',
-      index: i,
-      delta: { type: 'text_delta', text: block.text },
-    })}\n\n`);
+    events.push(
+      `data: ${JSON.stringify({
+        type: 'content_block_delta',
+        index: i,
+        delta: { type: 'text_delta', text: block.text },
+      })}\n\n`
+    );
 
     // content_block_stop
-    events.push(`data: ${JSON.stringify({
-      type: 'content_block_stop',
-      index: i,
-    })}\n\n`);
+    events.push(
+      `data: ${JSON.stringify({
+        type: 'content_block_stop',
+        index: i,
+      })}\n\n`
+    );
   }
 
   // message_delta with final usage and stop_reason
-  events.push(`data: ${JSON.stringify({
-    type: 'message_delta',
-    delta: { stop_reason: message.stop_reason || 'end_turn', stop_sequence: null },
-    usage: { output_tokens: message.usage?.output_tokens || 0 },
-  })}\n\n`);
+  events.push(
+    `data: ${JSON.stringify({
+      type: 'message_delta',
+      delta: { stop_reason: message.stop_reason || 'end_turn', stop_sequence: null },
+      usage: { output_tokens: message.usage?.output_tokens || 0 },
+    })}\n\n`
+  );
 
   // message_stop
   events.push(`data: ${JSON.stringify({ type: 'message_stop' })}\n\n`);
@@ -180,7 +188,7 @@ function synthesizeSSEFromMessage(message: AnthropicResponse): string[] {
  */
 async function* cliStreamToSSE(
   proc: ChildProcess,
-  collector: { result?: CliResultEvent },
+  collector: { result?: CliResultEvent }
 ): AsyncGenerator<Uint8Array> {
   const encoder = new TextEncoder();
   const rl = createInterface({ input: proc.stdout!, crlfDelay: Infinity });
@@ -200,7 +208,16 @@ async function* cliStreamToSSE(
   }
 
   // After process completes, synthesize SSE from the final message
+  // Prefer result event usage (accurate totals) over assistant message usage
   if (lastAssistantMessage) {
+    if (collector.result?.usage) {
+      lastAssistantMessage.usage = {
+        input_tokens: collector.result.usage.input_tokens || 0,
+        output_tokens: collector.result.usage.output_tokens || 0,
+        cache_creation_input_tokens: collector.result.usage.cache_creation_input_tokens || 0,
+        cache_read_input_tokens: collector.result.usage.cache_read_input_tokens || 0,
+      };
+    }
     const sseEvents = synthesizeSSEFromMessage(lastAssistantMessage);
     for (const sseEvent of sseEvents) {
       yield encoder.encode(sseEvent);
@@ -212,7 +229,7 @@ async function* cliStreamToSSE(
  * Collect all stream-json output and return the assistant message for non-streaming.
  */
 async function collectCliResponse(
-  proc: ChildProcess,
+  proc: ChildProcess
 ): Promise<{ response: AnthropicResponse; result?: CliResultEvent }> {
   const rl = createInterface({ input: proc.stdout!, crlfDelay: Infinity });
   let lastAssistantMessage: AnthropicResponse | null = null;
@@ -256,7 +273,7 @@ async function collectCliResponse(
  */
 export async function cliBackend(
   request: AnthropicRequest,
-  options: BackendOptions,
+  options: BackendOptions
 ): Promise<BackendResult> {
   // Clean expired sessions periodically
   cleanExpiredSessions();
@@ -267,11 +284,15 @@ export async function cliBackend(
 
   // Build claude -p args
   const args: string[] = [
-    '-p', prompt,
-    '--output-format', 'stream-json',
+    '-p',
+    prompt,
+    '--output-format',
+    'stream-json',
     '--verbose',
-    '--model', request.model,
-    '--allowedTools', 'Read,Edit,Write,Bash,Glob,Grep,WebFetch,WebSearch',
+    '--model',
+    request.model,
+    '--allowedTools',
+    'Read,Edit,Write,Bash,Glob,Grep,WebFetch,WebSearch',
   ];
 
   // System prompt (skip the "You are Claude Code" part — CLI already has it)
@@ -284,7 +305,9 @@ export async function cliBackend(
     args.push('--bare');
   }
 
-  logger.info(`[${options.requestId}] CLI backend: spawning claude -p (model: ${request.model}, stream: ${isStream})`);
+  logger.info(
+    `[${options.requestId}] CLI backend: spawning claude -p (model: ${request.model}, stream: ${isStream})`
+  );
 
   // Spawn the process
   const proc = spawn('claude', args, {
@@ -302,7 +325,9 @@ export async function cliBackend(
 
   // Set up timeout
   const timeout = setTimeout(() => {
-    logger.info(`[${options.requestId}] CLI backend: process timeout after ${PROCESS_TIMEOUT_MS}ms, killing`);
+    logger.info(
+      `[${options.requestId}] CLI backend: process timeout after ${PROCESS_TIMEOUT_MS}ms, killing`
+    );
     proc.kill('SIGTERM');
   }, PROCESS_TIMEOUT_MS);
 
@@ -343,7 +368,16 @@ export async function cliBackend(
       } else {
         // For non-streaming, collect all output then resolve
         collectCliResponse(proc)
-          .then(({ response }) => {
+          .then(({ response, result }) => {
+            // Prefer result event usage (accurate totals) over assistant message usage
+            if (result?.usage) {
+              response.usage = {
+                input_tokens: result.usage.input_tokens || 0,
+                output_tokens: result.usage.output_tokens || 0,
+                cache_creation_input_tokens: result.usage.cache_creation_input_tokens || 0,
+                cache_read_input_tokens: result.usage.cache_read_input_tokens || 0,
+              };
+            }
             resolve({
               status: 200,
               isStream: false,

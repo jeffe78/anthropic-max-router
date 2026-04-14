@@ -74,38 +74,27 @@ export class Logger {
     error?: Error,
     endpointType: 'anthropic' | 'openai' = 'anthropic'
   ) {
-    const endpoint = endpointType === 'openai' ? 'OpenAI' : 'Anthropic';
-    console.log(`\n[${timestamp}] [${requestId}] Incoming ${endpoint} request`);
-    console.log(`  Model: ${request.model}`);
-    console.log(`  Max tokens: ${request.max_tokens}`);
-
-    if (endpointType === 'openai') {
-      console.log(`  ✓ Translated OpenAI → Anthropic format`);
-    }
-
-    if (!hadSystemPrompt) {
-      console.log(`  ✓ Injected required system prompt`);
-    } else {
-      console.log(`  ✓ System prompt already present`);
-    }
-
-    console.log(`  ✓ OAuth token validated`);
+    const lines: string[] = [];
+    lines.push(`\n[${timestamp}] [${requestId}] Incoming request`);
+    lines.push(`  Model: ${request.model}`);
+    lines.push(`  Max tokens: ${request.max_tokens}`);
+    lines.push(hadSystemPrompt ? `  ✓ System prompt already present` : `  ✓ Injected required system prompt`);
+    lines.push(`  ✓ OAuth token validated`);
 
     if (error) {
-      console.log(`  ✗ Error: ${error.message}`);
+      lines.push(`  ✗ Error: ${error.message}`);
     } else if (response) {
-      console.log(`  → Forwarding to Anthropic API...`);
+      lines.push(`  → Forwarding to Anthropic API...`);
       if (response.status >= 200 && response.status < 300) {
-        console.log(`  ✓ Success (${response.status})`);
+        lines.push(`  ✓ Success (${response.status})`);
         if (response.data?.usage) {
-          console.log(
-            `  Tokens: input=${response.data.usage.input_tokens}, output=${response.data.usage.output_tokens}`
-          );
+          lines.push(`  Tokens: input=${response.data.usage.input_tokens}, output=${response.data.usage.output_tokens}`);
         }
       } else {
-        console.log(`  ✗ Error (${response.status})`);
+        lines.push(`  ✗ Error (${response.status})`);
       }
     }
+    process.stdout.write(lines.join('\n') + '\n');
   }
 
   private logMaximum(
@@ -117,38 +106,30 @@ export class Logger {
     error?: Error,
     endpointType: 'anthropic' | 'openai' = 'anthropic'
   ) {
-    const endpoint = endpointType === 'openai' ? 'OpenAI' : 'Anthropic';
-    console.log('\n' + '='.repeat(80));
-    console.log(`[${timestamp}] [${requestId}] ${endpoint} REQUEST`);
-    console.log('='.repeat(80));
-    console.log('Request Body (Anthropic format):');
-    console.log(JSON.stringify(request, null, 2));
-
-    if (endpointType === 'openai') {
-      console.log('\n✓ Translated OpenAI → Anthropic format');
-    }
-
-    if (!hadSystemPrompt) {
-      console.log('\n✓ Injected required system prompt');
-    } else {
-      console.log('\n✓ System prompt already present');
-    }
-
-    console.log('✓ OAuth token validated');
-    console.log('→ Forwarding to Anthropic API...\n');
+    const sep = '='.repeat(80);
+    const lines: string[] = [];
+    lines.push('\n' + sep);
+    lines.push(`[${timestamp}] [${requestId}] REQUEST`);
+    lines.push(sep);
+    lines.push('Request Body:');
+    lines.push(JSON.stringify(request, null, 2));
+    lines.push(hadSystemPrompt ? '\n✓ System prompt already present' : '\n✓ Injected required system prompt');
+    lines.push('✓ OAuth token validated');
+    lines.push('→ Forwarding to Anthropic API...\n');
 
     if (error) {
-      console.log('='.repeat(80));
-      console.log('ERROR');
-      console.log('='.repeat(80));
-      console.log(error);
+      lines.push(sep);
+      lines.push('ERROR');
+      lines.push(sep);
+      lines.push(String(error));
     } else if (response) {
-      console.log('='.repeat(80));
-      console.log(`RESPONSE (${response.status})`);
-      console.log('='.repeat(80));
-      console.log(JSON.stringify(response.data, null, 2));
+      lines.push(sep);
+      lines.push(`RESPONSE (${response.status})`);
+      lines.push(sep);
+      lines.push(JSON.stringify(response.data, null, 2));
     }
-    console.log('='.repeat(80) + '\n');
+    lines.push(sep + '\n');
+    process.stdout.write(lines.join('\n') + '\n');
   }
 
   info(message: string) {

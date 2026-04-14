@@ -172,6 +172,28 @@ async function embed(text: string): Promise<number[] | null> {
   }
 }
 
+// LRU embedding cache — avoids redundant Ollama calls for repeated fingerprints
+const EMBED_CACHE_MAX = 500;
+const EMBED_CACHE_TTL_MS = 3_600_000; // 1 hour
+const embeddingCache = new Map<string, { embedding: number[]; ts: number }>();
+
+async function cachedEmbed(text: string): Promise<number[] | null> {
+  const key = text.length > MAX_EMBED_INPUT_CHARS ? text.slice(0, MAX_EMBED_INPUT_CHARS) : text;
+  const cached = embeddingCache.get(key);
+  if (cached && Date.now() - cached.ts < EMBED_CACHE_TTL_MS) return cached.embedding;
+
+  const embedding = await embed(text);
+  if (embedding) {
+    if (embeddingCache.size >= EMBED_CACHE_MAX) {
+      // Evict oldest entry
+      const oldest = embeddingCache.keys().next().value;
+      if (oldest !== undefined) embeddingCache.delete(oldest);
+    }
+    embeddingCache.set(key, { embedding, ts: Date.now() });
+  }
+  return embedding;
+}
+
 // ---------------------------------------------------------------------------
 // Streaming token parser
 // ---------------------------------------------------------------------------
@@ -224,49 +246,83 @@ function resolveClient(fp: Fingerprint, agent: string | null): string {
 }
 
 // ---------------------------------------------------------------------------
-// Log to Postgres (fire-and-forget)
+// Batched usage logging — flush every 5s or 50 records
 // ---------------------------------------------------------------------------
+
+type UsageRow = unknown[];
+const usageBuffer: UsageRow[] = [];
+let flushTimer: ReturnType<typeof setTimeout> | null = null;
+const FLUSH_INTERVAL_MS = 5_000;
+const FLUSH_BATCH_SIZE = 50;
+
+const INSERT_COLUMNS =
+  'agent, automation, model, input_tokens, output_tokens, ' +
+  'cache_read_tokens, cache_create_tokens, duration_ms, status, stream, ' +
+  'request_id, source_ip, endpoint, has_images, system_prompt, ' +
+  'tool_names, message_count, fingerprint_text, embedding, account, instance, client';
+const COLS_PER_ROW = 22;
+
+async function flushUsageBuffer(): Promise<void> {
+  if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+  if (!usageBuffer.length || !pool) return;
+
+  const batch = usageBuffer.splice(0);
+  try {
+    // Build multi-row INSERT: VALUES ($1,...,$22), ($23,...,$44), ...
+    const valueClauses: string[] = [];
+    const params: unknown[] = [];
+    for (let i = 0; i < batch.length; i++) {
+      const offset = i * COLS_PER_ROW;
+      const placeholders = batch[i].map((_, j) => `$${offset + j + 1}`).join(',');
+      valueClauses.push(`(${placeholders})`);
+      params.push(...batch[i]);
+    }
+    await pool.query(
+      `INSERT INTO max_proxy_usage (${INSERT_COLUMNS}) VALUES ${valueClauses.join(',')}`,
+      params
+    );
+  } catch (err) {
+    logger.error('Failed to flush usage batch:', err);
+  }
+}
 
 export async function logUsage(record: UsageRecord): Promise<void> {
   if (!pool) return;
 
   try {
-    // Embed the fingerprint text (async, but we await to get the vector before INSERT)
-    const embedding = await embed(record.fingerprint_text);
+    const embedding = await cachedEmbed(record.fingerprint_text);
     const client = resolveClient(record.fingerprint, record.agent);
 
-    await pool.query(
-      `INSERT INTO max_proxy_usage
-        (agent, automation, model, input_tokens, output_tokens,
-         cache_read_tokens, cache_create_tokens, duration_ms, status, stream,
-         request_id, source_ip, endpoint, has_images, system_prompt,
-         tool_names, message_count, fingerprint_text, embedding, account, instance, client)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)`,
-      [
-        record.agent,
-        record.automation,
-        record.model,
-        record.input_tokens,
-        record.output_tokens,
-        record.cache_read_tokens,
-        record.cache_create_tokens,
-        record.duration_ms,
-        record.status,
-        record.stream,
-        record.request_id,
-        record.fingerprint.source_ip,
-        record.fingerprint.endpoint,
-        record.fingerprint.has_images,
-        record.fingerprint.system_prefix,
-        record.fingerprint.tool_names,
-        record.fingerprint.message_count,
-        record.fingerprint_text,
-        embedding ? `[${embedding.join(',')}]` : null,
-        process.env.ACCOUNT_LABEL || null,
-        process.env.INSTANCE_LABEL || null,
-        client,
-      ]
-    );
+    usageBuffer.push([
+      record.agent,
+      record.automation,
+      record.model,
+      record.input_tokens,
+      record.output_tokens,
+      record.cache_read_tokens,
+      record.cache_create_tokens,
+      record.duration_ms,
+      record.status,
+      record.stream,
+      record.request_id,
+      record.fingerprint.source_ip,
+      record.fingerprint.endpoint,
+      record.fingerprint.has_images,
+      record.fingerprint.system_prefix,
+      record.fingerprint.tool_names,
+      record.fingerprint.message_count,
+      record.fingerprint_text,
+      embedding ? `[${embedding.join(',')}]` : null,
+      process.env.ACCOUNT_LABEL || null,
+      process.env.INSTANCE_LABEL || null,
+      client,
+    ]);
+
+    if (usageBuffer.length >= FLUSH_BATCH_SIZE) {
+      await flushUsageBuffer();
+    } else if (!flushTimer) {
+      flushTimer = setTimeout(() => flushUsageBuffer(), FLUSH_INTERVAL_MS);
+    }
   } catch (err) {
     logger.error('Failed to log usage:', err);
   }
@@ -277,6 +333,7 @@ export async function logUsage(record: UsageRecord): Promise<void> {
 // ---------------------------------------------------------------------------
 
 export async function shutdownUsageTracker(): Promise<void> {
+  await flushUsageBuffer();
   if (pool) {
     await pool.end();
     pool = null;
