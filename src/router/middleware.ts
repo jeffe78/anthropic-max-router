@@ -20,6 +20,7 @@ const VALID_REQUEST_FIELDS = new Set([
   'stop_sequences',
   'metadata',
   'thinking',
+  'output_config',
 ]);
 
 /**
