@@ -295,6 +295,13 @@ export async function cliBackend(
     'Read,Edit,Write,Bash,Glob,Grep,WebFetch,WebSearch',
   ];
 
+  // Forward per-request effort level (extended-thinking budget) from
+  // output_config.effort → --effort. Previously dropped silently, so clients
+  // asking for xhigh/max got whatever the pod's env default was.
+  if (request.output_config?.effort) {
+    args.push('--effort', request.output_config.effort);
+  }
+
   // System prompt (skip the "You are Claude Code" part — CLI already has it)
   if (systemPrompt) {
     args.push('--append-system-prompt', systemPrompt);
@@ -306,7 +313,7 @@ export async function cliBackend(
   }
 
   logger.info(
-    `[${options.requestId}] CLI backend: spawning claude -p (model: ${request.model}, stream: ${isStream})`
+    `[${options.requestId}] CLI backend: spawning claude -p (model: ${request.model}, effort: ${request.output_config?.effort ?? 'default'}, stream: ${isStream})`
   );
 
   // Spawn the process

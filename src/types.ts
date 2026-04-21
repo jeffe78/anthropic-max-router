@@ -33,6 +33,9 @@ export interface AnthropicRequest {
   tools?: Tool[];
   tool_choice?: ToolChoice;
   stream?: boolean;
+  output_config?: {
+    effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+  };
 }
 
 /**
